@@ -50,6 +50,7 @@ import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.runtime.jobmanager.JobManagerProcessSpec;
 import org.apache.flink.runtime.jobmanager.JobManagerProcessUtils;
 import org.apache.flink.runtime.util.HadoopUtils;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.ShutdownHookUtil;
@@ -62,7 +63,6 @@ import org.apache.flink.yarn.entrypoint.YarnApplicationClusterEntryPoint;
 import org.apache.flink.yarn.entrypoint.YarnJobClusterEntrypoint;
 import org.apache.flink.yarn.entrypoint.YarnSessionClusterEntrypoint;
 
-import org.apache.commons.collections.ListUtils;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -105,6 +105,7 @@ import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.Charset;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -529,6 +530,19 @@ public class YarnClusterDescriptor implements ClusterDescriptor<ApplicationId> {
                         "Hadoop security with Kerberos is enabled but the login user "
                                 + "does not have Kerberos credentials or delegation tokens!");
             }
+
+            final boolean fetchToken =
+                    flinkConfiguration.getBoolean(SecurityOptions.KERBEROS_FETCH_DELEGATION_TOKEN);
+            final boolean yarnAccessFSEnabled =
+                    !CollectionUtil.isNullOrEmpty(
+                            flinkConfiguration.get(YarnConfigOptions.YARN_ACCESS));
+            if (!fetchToken && yarnAccessFSEnabled) {
+                throw new IllegalConfigurationException(
+                        String.format(
+                                "When %s is disabled, %s must be disabled as well.",
+                                SecurityOptions.KERBEROS_FETCH_DELEGATION_TOKEN.key(),
+                                YarnConfigOptions.YARN_ACCESS.key()));
+            }
         }
 
         isReadyForDeployment(clusterSpecification);
@@ -730,10 +744,7 @@ public class YarnClusterDescriptor implements ClusterDescriptor<ApplicationId> {
                     }
                 }
                 if (!queueFound) {
-                    String queueNames = "";
-                    for (QueueInfo queue : queues) {
-                        queueNames += queue.getQueueName() + ", ";
-                    }
+                    String queueNames = StringUtils.toQuotedListString(queues.toArray());
                     LOG.warn(
                             "The specified queue '"
                                     + this.yarnQueue
@@ -786,10 +797,12 @@ public class YarnClusterDescriptor implements ClusterDescriptor<ApplicationId> {
         final List<Path> providedLibDirs =
                 Utils.getQualifiedRemoteSharedPaths(configuration, yarnConfiguration);
 
+        Path stagingDirPath = getStagingDir(fs);
+        FileSystem stagingDirFs = stagingDirPath.getFileSystem(yarnConfiguration);
         final YarnApplicationFileUploader fileUploader =
                 YarnApplicationFileUploader.from(
-                        fs,
-                        getStagingDir(fs),
+                        stagingDirFs,
+                        stagingDirPath,
                         providedLibDirs,
                         appContext.getApplicationId(),
                         getFileReplication());
@@ -1081,13 +1094,17 @@ public class YarnClusterDescriptor implements ClusterDescriptor<ApplicationId> {
         if (UserGroupInformation.isSecurityEnabled()) {
             // set HDFS delegation tokens when security is enabled
             LOG.info("Adding delegation token to the AM container.");
-            List<Path> yarnAccessList =
-                    ConfigUtils.decodeListFromConfig(
-                            configuration, YarnConfigOptions.YARN_ACCESS, Path::new);
-            Utils.setTokensFor(
-                    amContainer,
-                    ListUtils.union(yarnAccessList, fileUploader.getRemotePaths()),
-                    yarnConfiguration);
+            final List<Path> pathsToObtainToken = new ArrayList<>();
+            boolean fetchToken =
+                    configuration.getBoolean(SecurityOptions.KERBEROS_FETCH_DELEGATION_TOKEN);
+            if (fetchToken) {
+                List<Path> yarnAccessList =
+                        ConfigUtils.decodeListFromConfig(
+                                configuration, YarnConfigOptions.YARN_ACCESS, Path::new);
+                pathsToObtainToken.addAll(yarnAccessList);
+                pathsToObtainToken.addAll(fileUploader.getRemotePaths());
+            }
+            Utils.setTokensFor(amContainer, pathsToObtainToken, yarnConfiguration, fetchToken);
         }
 
         amContainer.setLocalResources(fileUploader.getRegisteredLocalResources());
@@ -1232,15 +1249,19 @@ public class YarnClusterDescriptor implements ClusterDescriptor<ApplicationId> {
      * Returns the configured remote target home directory if set, otherwise returns the default
      * home directory.
      *
-     * @param fileSystem file system used
+     * @param defaultFileSystem default file system used
      * @return the remote target home directory
      */
-    private Path getStagingDir(FileSystem fileSystem) {
+    @VisibleForTesting
+    Path getStagingDir(FileSystem defaultFileSystem) throws IOException {
         final String configuredStagingDir =
                 flinkConfiguration.getString(YarnConfigOptions.STAGING_DIRECTORY);
-        return configuredStagingDir != null
-                ? fileSystem.makeQualified(new Path(configuredStagingDir))
-                : fileSystem.getHomeDirectory();
+        if (configuredStagingDir == null) {
+            return defaultFileSystem.getHomeDirectory();
+        }
+        FileSystem stagingDirFs =
+                new Path(configuredStagingDir).getFileSystem(defaultFileSystem.getConf());
+        return stagingDirFs.makeQualified(new Path(configuredStagingDir));
     }
 
     private int getFileReplication() {

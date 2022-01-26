@@ -22,9 +22,10 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.concurrent.FutureUtils;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.concurrent.FutureUtils;
 
 import org.junit.Ignore;
 import org.junit.Rule;
@@ -82,15 +83,17 @@ public class BlobCacheCleanupTest extends TestLogger {
 
         try {
             Configuration config = new Configuration();
-            config.setString(
-                    BlobServerOptions.STORAGE_DIRECTORY,
-                    temporaryFolder.newFolder().getAbsolutePath());
             config.setLong(BlobServerOptions.CLEANUP_INTERVAL, 1L);
 
-            server = new BlobServer(config, new VoidBlobStore());
+            server = new BlobServer(config, temporaryFolder.newFolder(), new VoidBlobStore());
             server.start();
             InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-            cache = new PermanentBlobCache(config, new VoidBlobStore(), serverAddress);
+            cache =
+                    new PermanentBlobCache(
+                            config,
+                            temporaryFolder.newFolder(),
+                            new VoidBlobStore(),
+                            serverAddress);
 
             // upload blobs
             keys.add(server.putPermanent(jobId, buf));
@@ -150,13 +153,11 @@ public class BlobCacheCleanupTest extends TestLogger {
      * when registering, releasing, and re-registering jobs.
      */
     @Test
-    public void testPermanentJobReferences() throws IOException, InterruptedException {
+    public void testPermanentJobReferences() throws IOException {
 
         JobID jobId = new JobID();
 
         Configuration config = new Configuration();
-        config.setString(
-                BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
         config.setLong(
                 BlobServerOptions.CLEANUP_INTERVAL,
                 3_600_000L); // 1 hour should effectively prevent races
@@ -165,7 +166,8 @@ public class BlobCacheCleanupTest extends TestLogger {
         InetSocketAddress serverAddress = new InetSocketAddress("localhost", 12345);
 
         try (PermanentBlobCache cache =
-                new PermanentBlobCache(config, new VoidBlobStore(), serverAddress)) {
+                new PermanentBlobCache(
+                        config, temporaryFolder.newFolder(), new VoidBlobStore(), serverAddress)) {
 
             // register once
             cache.registerJob(jobId);
@@ -228,15 +230,20 @@ public class BlobCacheCleanupTest extends TestLogger {
 
         try {
             Configuration config = new Configuration();
-            config.setString(
-                    BlobServerOptions.STORAGE_DIRECTORY,
-                    temporaryFolder.newFolder().getAbsolutePath());
             config.setLong(BlobServerOptions.CLEANUP_INTERVAL, cleanupInterval);
 
-            server = new BlobServer(config, new VoidBlobStore());
+            server = new BlobServer(config, temporaryFolder.newFolder(), new VoidBlobStore());
             server.start();
             InetSocketAddress serverAddress = new InetSocketAddress("localhost", server.getPort());
-            cache = new PermanentBlobCache(config, new VoidBlobStore(), serverAddress);
+            final BlobCacheSizeTracker tracker =
+                    new BlobCacheSizeTracker(MemorySize.ofMebiBytes(100).getBytes());
+            cache =
+                    new PermanentBlobCache(
+                            config,
+                            temporaryFolder.newFolder(),
+                            new VoidBlobStore(),
+                            serverAddress,
+                            tracker);
 
             // upload blobs
             keys.add(server.putPermanent(jobId, buf));
@@ -245,26 +252,29 @@ public class BlobCacheCleanupTest extends TestLogger {
 
             checkFileCountForJob(2, jobId, server);
             checkFileCountForJob(0, jobId, cache);
+            checkBlobCacheSizeTracker(tracker, jobId, 0);
 
             // register once
             cache.registerJob(jobId);
 
             checkFileCountForJob(2, jobId, server);
             checkFileCountForJob(0, jobId, cache);
+            checkBlobCacheSizeTracker(tracker, jobId, 0);
 
             for (PermanentBlobKey key : keys) {
-                cache.getFile(jobId, key);
+                cache.readFile(jobId, key);
             }
 
             // register again (let's say, from another thread or so)
             cache.registerJob(jobId);
             for (PermanentBlobKey key : keys) {
-                cache.getFile(jobId, key);
+                cache.readFile(jobId, key);
             }
 
             assertEquals(2, checkFilesExist(jobId, keys, cache, true));
             checkFileCountForJob(2, jobId, server);
             checkFileCountForJob(2, jobId, cache);
+            checkBlobCacheSizeTracker(tracker, jobId, 2);
 
             // after releasing once, nothing should change
             cache.releaseJob(jobId);
@@ -272,6 +282,7 @@ public class BlobCacheCleanupTest extends TestLogger {
             assertEquals(2, checkFilesExist(jobId, keys, cache, true));
             checkFileCountForJob(2, jobId, server);
             checkFileCountForJob(2, jobId, cache);
+            checkBlobCacheSizeTracker(tracker, jobId, 2);
 
             // after releasing the second time, the job is up for deferred cleanup
             cache.releaseJob(jobId);
@@ -289,6 +300,7 @@ public class BlobCacheCleanupTest extends TestLogger {
 
             // files are up for cleanup now...wait for it:
             verifyJobCleanup(cache, jobId, keys);
+            checkBlobCacheSizeTracker(tracker, jobId, 0);
             // server should be unaffected
             checkFileCountForJob(2, jobId, server);
         } finally {
@@ -335,16 +347,16 @@ public class BlobCacheCleanupTest extends TestLogger {
         byte[] data2 = Arrays.copyOfRange(data, 10, 54);
 
         Configuration config = new Configuration();
-        config.setString(
-                BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
         config.setLong(BlobServerOptions.CLEANUP_INTERVAL, cleanupInterval);
 
         long cleanupLowerBound;
 
-        try (BlobServer server = new BlobServer(config, new VoidBlobStore());
+        try (BlobServer server =
+                        new BlobServer(config, temporaryFolder.newFolder(), new VoidBlobStore());
                 final BlobCacheService cache =
                         new BlobCacheService(
                                 config,
+                                temporaryFolder.newFolder(),
                                 new VoidBlobStore(),
                                 new InetSocketAddress("localhost", server.getPort()))) {
             ConcurrentMap<Tuple2<JobID, TransientBlobKey>, Long> transientBlobExpiryTimes =
@@ -446,5 +458,10 @@ public class BlobCacheCleanupTest extends TestLogger {
         // the blob cache should no longer contain the files
         // this fails if we exited via a timeout
         checkFileCountForJob(0, jobId, cache);
+    }
+
+    private static void checkBlobCacheSizeTracker(
+            BlobCacheSizeTracker tracker, JobID jobId, int expected) {
+        assertEquals(tracker.getBlobKeysByJobId(jobId).size(), expected);
     }
 }

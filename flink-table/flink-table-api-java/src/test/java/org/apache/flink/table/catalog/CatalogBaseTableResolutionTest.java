@@ -26,10 +26,14 @@ import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.expressions.resolver.ExpressionResolver.ExpressionResolverBuilder;
 import org.apache.flink.table.expressions.utils.ResolvedExpressionMock;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.utils.CatalogManagerMocks;
 import org.apache.flink.table.utils.ExpressionResolverMocks;
 
 import org.junit.Test;
+
+import javax.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -41,8 +45,8 @@ import static org.apache.flink.core.testutils.FlinkMatchers.containsMessage;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_CATALOG;
 import static org.apache.flink.table.utils.CatalogManagerMocks.DEFAULT_DATABASE;
 import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -166,6 +170,28 @@ public class CatalogBaseTableResolutionTest {
         }
     }
 
+    @Test
+    public void testInvalidPartitionKeys() {
+        final CatalogTable catalogTable =
+                CatalogTable.of(
+                        TABLE_SCHEMA,
+                        null,
+                        Arrays.asList("region", "countyINVALID"),
+                        Collections.emptyMap());
+
+        try {
+            resolveCatalogBaseTable(ResolvedCatalogTable.class, catalogTable);
+            fail("Invalid partition keys expected.");
+        } catch (Exception e) {
+            assertThat(
+                    e,
+                    containsMessage(
+                            "Invalid partition key 'countyINVALID'. A partition key must "
+                                    + "reference a physical column in the schema. Available "
+                                    + "columns are: [id, region, county]"));
+        }
+    }
+
     // --------------------------------------------------------------------------------------------
     // Utilities
     // --------------------------------------------------------------------------------------------
@@ -268,7 +294,7 @@ public class CatalogBaseTableResolutionTest {
     }
 
     private static ResolvedExpression resolveSqlExpression(
-            String sqlExpression, TableSchema inputSchema) {
+            String sqlExpression, RowType inputRowType, @Nullable LogicalType outputType) {
         switch (sqlExpression) {
             case COMPUTED_SQL:
                 return COMPUTED_COLUMN_RESOLVED;

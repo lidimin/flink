@@ -19,11 +19,11 @@
 package org.apache.flink.runtime.scheduler.adaptive;
 
 import org.apache.flink.api.common.JobStatus;
-import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ExecutionGraph;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.FutureUtils;
 
 import org.slf4j.Logger;
 
@@ -106,7 +106,7 @@ public class CreatingExecutionGraph implements State {
 
     @Override
     public JobStatus getJobStatus() {
-        return JobStatus.INITIALIZING;
+        return JobStatus.CREATED;
     }
 
     @Override

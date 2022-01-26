@@ -53,6 +53,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ForkJoinPool;
@@ -81,6 +82,8 @@ public class ActiveResourceManagerTest extends TestLogger {
     private static final long TESTING_START_WORKER_TIMEOUT_MS = 50;
 
     private static final WorkerResourceSpec WORKER_RESOURCE_SPEC = WorkerResourceSpec.ZERO;
+    private static final TaskExecutorMemoryConfiguration TESTING_CONFIG =
+            new TaskExecutorMemoryConfiguration(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 21L, 36L);
 
     /** Tests worker successfully requested, started and registered. */
     @Test
@@ -788,8 +791,8 @@ public class ActiveResourceManagerTest extends TestLogger {
                             runInMainThread(() -> requestResourceFuture.complete(tmResourceId));
 
                             // worker registered, verify not released due to timeout
-                            CompletableFuture<RegistrationResponse> registerTaskExecutorFuture =
-                                    registerTaskExecutor(tmResourceId);
+                            RegistrationResponse registrationResponse =
+                                    registerTaskExecutor(tmResourceId).join();
 
                             final long registrationTime = (System.nanoTime() - start) / 1_000_000;
 
@@ -797,7 +800,7 @@ public class ActiveResourceManagerTest extends TestLogger {
                                     "The registration must not take longer than the start worker timeout. If it does, then this indicates a very slow machine.",
                                     registrationTime < TESTING_START_WORKER_TIMEOUT_MS);
                             assertThat(
-                                    registerTaskExecutorFuture.get(TIMEOUT_SEC, TimeUnit.SECONDS),
+                                    registrationResponse,
                                     instanceOf(RegistrationResponse.Success.class));
                             assertFalse(releaseResourceFuture.isDone());
                         });
@@ -888,8 +891,8 @@ public class ActiveResourceManagerTest extends TestLogger {
                             driver,
                             configuration,
                             rpcService,
+                            UUID.randomUUID(),
                             ResourceID.generate(),
-                            rmServices.highAvailabilityServices,
                             rmServices.heartbeatServices,
                             rmServices.slotManager,
                             NoOpResourceManagerPartitionTracker::get,
@@ -904,7 +907,9 @@ public class ActiveResourceManagerTest extends TestLogger {
                             ForkJoinPool.commonPool());
 
             activeResourceManager.start();
-            rmServices.grantLeadership();
+            activeResourceManager
+                    .getStartedFuture()
+                    .get(TIMEOUT_TIME.getSize(), TIMEOUT_TIME.getUnit());
 
             return activeResourceManager;
         }
@@ -941,7 +946,7 @@ public class ActiveResourceManagerTest extends TestLogger {
                             1234,
                             23456,
                             new HardwareDescription(1, 2L, 3L, 4L),
-                            TaskExecutorMemoryConfiguration.create(flinkConfig),
+                            TESTING_CONFIG,
                             ResourceProfile.ZERO,
                             ResourceProfile.ZERO);
 

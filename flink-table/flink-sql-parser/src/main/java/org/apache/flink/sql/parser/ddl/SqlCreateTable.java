@@ -230,7 +230,7 @@ public class SqlCreateTable extends SqlCreate implements ExtendedSqlNode {
      * </pre>
      *
      * <p>is equivalent with query "col1, col2, to_timestamp(col2) as col3", caution that the
-     * "computed column" operandshave been reversed.
+     * "computed column" operands have been reversed.
      */
     public String getColumnSqlString() {
         SqlPrettyWriter writer =
@@ -266,7 +266,7 @@ public class SqlCreateTable extends SqlCreate implements ExtendedSqlNode {
             writer.keyword("IF NOT EXISTS");
         }
         tableName.unparse(writer, leftPrec, rightPrec);
-        if (columnList.size() > 0) {
+        if (columnList.size() > 0 || tableConstraints.size() > 0 || watermark != null) {
             SqlWriter.Frame frame =
                     writer.startList(SqlWriter.FrameTypeEnum.create("sds"), "(", ")");
             for (SqlNode column : columnList) {

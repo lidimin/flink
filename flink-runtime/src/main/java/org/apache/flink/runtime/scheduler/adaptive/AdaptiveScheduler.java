@@ -23,8 +23,8 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.configuration.SchedulerExecutionMode;
-import org.apache.flink.metrics.Gauge;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.JobException;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
@@ -40,7 +40,6 @@ import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.client.JobExecutionException;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
-import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
@@ -72,7 +71,6 @@ import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlot;
 import org.apache.flink.runtime.messages.FlinkJobNotFoundException;
 import org.apache.flink.runtime.messages.checkpoint.DeclineCheckpoint;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
-import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
 import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
 import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
@@ -87,6 +85,7 @@ import org.apache.flink.runtime.scheduler.DefaultVertexParallelismStore;
 import org.apache.flink.runtime.scheduler.ExecutionGraphFactory;
 import org.apache.flink.runtime.scheduler.ExecutionGraphHandler;
 import org.apache.flink.runtime.scheduler.ExecutionGraphInfo;
+import org.apache.flink.runtime.scheduler.JobStatusStore;
 import org.apache.flink.runtime.scheduler.OperatorCoordinatorHandler;
 import org.apache.flink.runtime.scheduler.SchedulerBase;
 import org.apache.flink.runtime.scheduler.SchedulerNG;
@@ -104,6 +103,7 @@ import org.apache.flink.runtime.util.ResourceCounter;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.function.FunctionWithException;
 import org.apache.flink.util.function.ThrowingConsumer;
 
@@ -116,7 +116,9 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -167,9 +169,9 @@ public class AdaptiveScheduler
     private final ClassLoader userCodeClassLoader;
     private final JobManagerJobMetricGroup jobManagerJobMetricGroup;
 
+    private final CheckpointsCleaner checkpointsCleaner;
     private final CompletedCheckpointStore completedCheckpointStore;
     private final CheckpointIDCounter checkpointIdCounter;
-    private final CheckpointsCleaner checkpointsCleaner;
 
     private final CompletableFuture<JobStatus> jobTerminationFuture = new CompletableFuture<>();
 
@@ -178,7 +180,7 @@ public class AdaptiveScheduler
     private final ComponentMainThreadExecutor componentMainThreadExecutor;
     private final FatalErrorHandler fatalErrorHandler;
 
-    private final JobStatusListener jobStatusListener;
+    private final Collection<JobStatusListener> jobStatusListeners;
 
     private final SlotAllocator slotAllocator;
 
@@ -189,6 +191,7 @@ public class AdaptiveScheduler
     private final Duration resourceStabilizationTimeout;
 
     private final ExecutionGraphFactory executionGraphFactory;
+    private final JobStatusStore jobStatusStore;
 
     private State state = new Created(this, LOG);
 
@@ -210,6 +213,7 @@ public class AdaptiveScheduler
             SlotAllocator slotAllocator,
             Executor ioExecutor,
             ClassLoader userCodeClassLoader,
+            CheckpointsCleaner checkpointsCleaner,
             CheckpointRecoveryFactory checkpointRecoveryFactory,
             Duration initialResourceAllocationTimeout,
             Duration resourceStabilizationTimeout,
@@ -238,24 +242,26 @@ public class AdaptiveScheduler
         this.restartBackoffTimeStrategy = restartBackoffTimeStrategy;
         this.jobManagerJobMetricGroup = jobManagerJobMetricGroup;
         this.fatalErrorHandler = fatalErrorHandler;
+        this.checkpointsCleaner = checkpointsCleaner;
         this.completedCheckpointStore =
                 SchedulerUtils.createCompletedCheckpointStoreIfCheckpointingIsEnabled(
                         jobGraph,
                         configuration,
                         userCodeClassLoader,
                         checkpointRecoveryFactory,
+                        ioExecutor,
                         LOG);
         this.checkpointIdCounter =
                 SchedulerUtils.createCheckpointIDCounterIfCheckpointingIsEnabled(
                         jobGraph, checkpointRecoveryFactory);
-        this.checkpointsCleaner = new CheckpointsCleaner();
 
         this.slotAllocator = slotAllocator;
 
         declarativeSlotPool.registerNewSlotsListener(this::newResourcesAvailable);
 
         this.componentMainThreadExecutor = mainThreadExecutor;
-        this.jobStatusListener = jobStatusListener;
+
+        this.jobStatusStore = new JobStatusStore(initializationTimestamp);
 
         this.scaleUpController = new ReactiveScaleUpController(configuration);
 
@@ -265,7 +271,19 @@ public class AdaptiveScheduler
 
         this.executionGraphFactory = executionGraphFactory;
 
-        registerMetrics();
+        final Collection<JobStatusListener> tmpJobStatusListeners = new ArrayList<>();
+        tmpJobStatusListeners.add(Preconditions.checkNotNull(jobStatusListener));
+        tmpJobStatusListeners.add(jobStatusStore);
+
+        SchedulerBase.registerJobMetrics(
+                jobManagerJobMetricGroup,
+                jobStatusStore,
+                () -> (long) numRestarts,
+                tmpJobStatusListeners::add,
+                initializationTimestamp,
+                MetricOptions.JobStatusMetricsSettings.fromConfiguration(configuration));
+
+        jobStatusListeners = Collections.unmodifiableCollection(tmpJobStatusListeners);
     }
 
     private static void assertPreconditions(JobGraph jobGraph) throws RuntimeException {
@@ -392,12 +410,6 @@ public class AdaptiveScheduler
                 "newResourcesAvailable");
     }
 
-    private void registerMetrics() {
-        final Gauge<Integer> numRestartsMetric = () -> numRestarts;
-        jobManagerJobMetricGroup.gauge(MetricNames.NUM_RESTARTS, numRestartsMetric);
-        jobManagerJobMetricGroup.gauge(MetricNames.FULL_RESTARTS, numRestartsMetric);
-    }
-
     @Override
     public void startScheduling() {
         state.as(Created.class)
@@ -420,10 +432,12 @@ public class AdaptiveScheduler
 
         backgroundTask.abort();
         // wait for the background task to finish and then close services
-        return FutureUtils.runAfterwardsAsync(
-                backgroundTask.getTerminationFuture(),
-                () -> stopCheckpointServicesSafely(jobTerminationFuture.get()),
-                getMainThreadExecutor());
+        return FutureUtils.composeAfterwards(
+                FutureUtils.runAfterwardsAsync(
+                        backgroundTask.getTerminationFuture(),
+                        () -> stopCheckpointServicesSafely(jobTerminationFuture.get()),
+                        getMainThreadExecutor()),
+                checkpointsCleaner::closeAsync);
     }
 
     private void stopCheckpointServicesSafely(JobStatus terminalState) {
@@ -601,6 +615,19 @@ public class AdaptiveScheduler
     }
 
     @Override
+    public CompletableFuture<String> triggerCheckpoint() {
+        return state.tryCall(
+                        StateWithExecutionGraph.class,
+                        StateWithExecutionGraph::triggerCheckpoint,
+                        "triggerCheckpoint")
+                .orElse(
+                        FutureUtils.completedExceptionally(
+                                new CheckpointException(
+                                        "The Flink job is currently not executing.",
+                                        CheckpointFailureReason.TRIGGER_CHECKPOINT_FAILURE)));
+    }
+
+    @Override
     public void acknowledgeCheckpoint(
             JobID jobID,
             ExecutionAttemptID executionAttemptID,
@@ -737,6 +764,7 @@ public class AdaptiveScheduler
                 jobInformation.getName(),
                 jobStatus,
                 cause,
+                jobInformation.getCheckpointingSettings(),
                 initializationTimestamp);
     }
 
@@ -958,9 +986,15 @@ public class AdaptiveScheduler
             ExecutionGraph executionGraph, ReservedSlots reservedSlots) {
         for (ExecutionVertex executionVertex : executionGraph.getAllExecutionVertices()) {
             final LogicalSlot assignedSlot = reservedSlots.getSlotFor(executionVertex.getID());
-            executionVertex
-                    .getCurrentExecutionAttempt()
-                    .registerProducedPartitions(assignedSlot.getTaskManagerLocation(), false);
+            final CompletableFuture<Void> registrationFuture =
+                    executionVertex
+                            .getCurrentExecutionAttempt()
+                            .registerProducedPartitions(
+                                    assignedSlot.getTaskManagerLocation(), false);
+            Preconditions.checkState(
+                    registrationFuture.isDone(),
+                    "Partition registration must be completed immediately for reactive mode");
+
             executionVertex.tryAssignResource(assignedSlot);
         }
 
@@ -1034,15 +1068,17 @@ public class AdaptiveScheduler
 
     @Override
     public void onFinished(ArchivedExecutionGraph archivedExecutionGraph) {
-        if (jobStatusListener != null) {
-            jobStatusListener.jobStatusChanges(
-                    jobInformation.getJobID(),
-                    archivedExecutionGraph.getState(),
-                    archivedExecutionGraph.getStatusTimestamp(archivedExecutionGraph.getState()),
-                    archivedExecutionGraph.getFailureInfo() != null
-                            ? archivedExecutionGraph.getFailureInfo().getException()
-                            : null);
-        }
+
+        @Nullable
+        final Throwable optionalFailure =
+                archivedExecutionGraph.getFailureInfo() != null
+                        ? archivedExecutionGraph.getFailureInfo().getException()
+                        : null;
+        LOG.info(
+                "Job {} reached terminal state {}.",
+                archivedExecutionGraph.getJobID(),
+                archivedExecutionGraph.getState(),
+                optionalFailure);
 
         jobTerminationFuture.complete(archivedExecutionGraph.getState());
     }
@@ -1057,7 +1093,7 @@ public class AdaptiveScheduler
         restartBackoffTimeStrategy.notifyFailure(failure);
         if (restartBackoffTimeStrategy.canRestart()) {
             return Executing.FailureResult.canRestart(
-                    Duration.ofMillis(restartBackoffTimeStrategy.getBackoffTime()));
+                    failure, Duration.ofMillis(restartBackoffTimeStrategy.getBackoffTime()));
         } else {
             return Executing.FailureResult.canNotRestart(
                     new JobException(
@@ -1124,9 +1160,22 @@ public class AdaptiveScheduler
                     state.getClass().getSimpleName(),
                     targetState.getStateClass().getSimpleName());
 
+            final JobStatus previousJobStatus = state.getJobStatus();
+
             state.onLeave(targetState.getStateClass());
             T targetStateInstance = targetState.getState();
             state = targetStateInstance;
+
+            final JobStatus newJobStatus = state.getJobStatus();
+
+            if (previousJobStatus != newJobStatus) {
+                final long timestamp = System.currentTimeMillis();
+                jobStatusListeners.forEach(
+                        listener ->
+                                listener.jobStatusChanges(
+                                        jobInformation.getJobID(), newJobStatus, timestamp));
+            }
+
             return targetStateInstance;
         } finally {
             isTransitioningState = false;

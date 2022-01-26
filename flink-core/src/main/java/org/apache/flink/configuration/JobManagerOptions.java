@@ -257,15 +257,6 @@ public class JobManagerOptions {
                     .withDescription(
                             "The maximum number of prior execution attempts kept in history.");
 
-    /** The maximum number of failures kept in the exception history. */
-    @Documentation.Section(Documentation.Sections.ALL_JOB_MANAGER)
-    public static final ConfigOption<Integer> MAX_EXCEPTION_HISTORY_SIZE =
-            key("jobmanager.exception-history-size")
-                    .intType()
-                    .defaultValue(16)
-                    .withDescription(
-                            "The maximum number of failures collected by the exception history per job.");
-
     /**
      * This option specifies the failover strategy, i.e. how the job computation recovers from task
      * failures.
@@ -289,7 +280,7 @@ public class JobManagerOptions {
                                                     "'region': Restarts all tasks that could be affected by the task failure. "
                                                             + "More details can be found %s.",
                                                     link(
-                                                            "../dev/task_failure_recovery.html#restart-pipelined-region-failover-strategy",
+                                                            "{{.Site.BaseURL}}{{.Site.LanguagePrefix}}/docs/ops/state/task_failure_recovery/#restart-pipelined-region-failover-strategy",
                                                             "here")))
                                     .build());
 
@@ -340,6 +331,32 @@ public class JobManagerOptions {
                                     + "JobManager could be faster, since no reverse DNS lookup is performed. "
                                     + "However, local input split assignment (such as for HDFS files) may be impacted.");
 
+    @Documentation.Section({
+        Documentation.Sections.EXPERT_JOB_MANAGER,
+        Documentation.Sections.ALL_JOB_MANAGER
+    })
+    public static final ConfigOption<Integer> JOB_MANAGER_FUTURE_POOL_SIZE =
+            key("jobmanager.future-pool.size")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The size of the future thread pool to execute future callbacks for all spawned JobMasters. "
+                                    + "If no value is specified, then Flink defaults to the number of available CPU cores.");
+
+    @Documentation.Section({
+        Documentation.Sections.EXPERT_JOB_MANAGER,
+        Documentation.Sections.ALL_JOB_MANAGER
+    })
+    public static final ConfigOption<Integer> JOB_MANAGER_IO_POOL_SIZE =
+            key("jobmanager.io-pool.size")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The size of the IO thread pool to run blocking operations for all spawned JobMasters. "
+                                    + "This includes recovery and completion of checkpoints. "
+                                    + "Increase this value if you experience slow checkpoint operations when running many jobs. "
+                                    + "If no value is specified, then Flink defaults to the number of available CPU cores.");
+
     /** The timeout in milliseconds for requesting a slot from Slot Pool. */
     @Documentation.Section(Documentation.Sections.EXPERT_SCHEDULING)
     public static final ConfigOption<Long> SLOT_REQUEST_TIMEOUT =
@@ -370,13 +387,16 @@ public class JobManagerOptions {
                                     .list(
                                             text("'Ng': new generation scheduler"),
                                             text(
-                                                    "'Adaptive': adaptive scheduler; supports reactive mode"))
+                                                    "'Adaptive': adaptive scheduler; supports reactive mode"),
+                                            text(
+                                                    "'AdaptiveBatch': adaptive batch scheduler, which can automatically decide parallelisms of job vertices for batch jobs"))
                                     .build());
 
     /** Type of scheduler implementation. */
     public enum SchedulerType {
         Ng,
-        Adaptive
+        Adaptive,
+        AdaptiveBatch
     }
 
     @Documentation.Section(Documentation.Sections.EXPERT_SCHEDULING)
@@ -410,7 +430,7 @@ public class JobManagerOptions {
     public static final ConfigOption<Duration> RESOURCE_WAIT_TIMEOUT =
             key("jobmanager.adaptive-scheduler.resource-wait-timeout")
                     .durationType()
-                    .defaultValue(Duration.ofSeconds(10))
+                    .defaultValue(Duration.ofMinutes(5))
                     .withDescription(
                             Description.builder()
                                     .text(
@@ -436,11 +456,12 @@ public class JobManagerOptions {
     public static final ConfigOption<Duration> RESOURCE_STABILIZATION_TIMEOUT =
             key("jobmanager.adaptive-scheduler.resource-stabilization-timeout")
                     .durationType()
-                    .defaultValue(RESOURCE_WAIT_TIMEOUT.defaultValue())
+                    .defaultValue(Duration.ofSeconds(10L))
                     .withDescription(
                             Description.builder()
                                     .text(
                                             "The resource stabilization timeout defines the time the JobManager will wait if fewer than the desired but sufficient resources are available. "
+                                                    + "The timeout starts once sufficient resources for running the job are available. "
                                                     + "Once this timeout has passed, the job will start executing with the available resources.")
                                     .linebreak()
                                     .text(
@@ -461,6 +482,81 @@ public class JobManagerOptions {
                     .defaultValue(true)
                     .withDescription(
                             "Controls whether partitions should already be released during the job execution.");
+
+    @Documentation.Section({
+        Documentation.Sections.EXPERT_SCHEDULING,
+        Documentation.Sections.ALL_JOB_MANAGER
+    })
+    public static final ConfigOption<Integer> ADAPTIVE_BATCH_SCHEDULER_MIN_PARALLELISM =
+            key("jobmanager.scheduler.adaptive-batch.min-parallelism")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The lower bound of allowed parallelism to set adaptively if %s has been set to %s",
+                                            code(SCHEDULER.key()),
+                                            code(SchedulerType.AdaptiveBatch.name()))
+                                    .build());
+
+    @Documentation.Section({
+        Documentation.Sections.EXPERT_SCHEDULING,
+        Documentation.Sections.ALL_JOB_MANAGER
+    })
+    public static final ConfigOption<Integer> ADAPTIVE_BATCH_SCHEDULER_MAX_PARALLELISM =
+            key("jobmanager.scheduler.adaptive-batch.max-parallelism")
+                    .intType()
+                    .defaultValue(128)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The upper bound of allowed parallelism to set adaptively if %s has been set to %s",
+                                            code(SCHEDULER.key()),
+                                            code(SchedulerType.AdaptiveBatch.name()))
+                                    .build());
+
+    @Documentation.Section({
+        Documentation.Sections.EXPERT_SCHEDULING,
+        Documentation.Sections.ALL_JOB_MANAGER
+    })
+    public static final ConfigOption<MemorySize> ADAPTIVE_BATCH_SCHEDULER_DATA_VOLUME_PER_TASK =
+            key("jobmanager.scheduler.adaptive-batch.data-volume-per-task")
+                    .memoryType()
+                    .defaultValue(MemorySize.ofMebiBytes(1024))
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The size of data volume to expect each task instance to process if %s has been set to %s",
+                                            code(SCHEDULER.key()),
+                                            code(SchedulerType.AdaptiveBatch.name()))
+                                    .build());
+
+    @Documentation.Section({
+        Documentation.Sections.EXPERT_SCHEDULING,
+        Documentation.Sections.ALL_JOB_MANAGER
+    })
+    public static final ConfigOption<Integer> ADAPTIVE_BATCH_SCHEDULER_DEFAULT_SOURCE_PARALLELISM =
+            key("jobmanager.scheduler.adaptive-batch.source-parallelism.default")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "The default parallelism of source vertices if %s has been set to %s",
+                                            code(SCHEDULER.key()),
+                                            code(SchedulerType.AdaptiveBatch.name()))
+                                    .build());
+
+    /**
+     * The JobManager's ResourceID. If not configured, the ResourceID will be generated randomly.
+     */
+    @Documentation.Section(Documentation.Sections.ALL_JOB_MANAGER)
+    public static final ConfigOption<String> JOB_MANAGER_RESOURCE_ID =
+            key("jobmanager.resource-id")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The JobManager's ResourceID. If not configured, the ResourceID will be generated randomly.");
 
     // ---------------------------------------------------------------------------------------------
 

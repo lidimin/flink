@@ -216,7 +216,6 @@ public class RocksDBStateBackend extends AbstractManagedMemoryStateBackend
         }
         this.checkpointStreamBackend = checkNotNull(checkpointStreamBackend);
         this.rocksDBStateBackend = new EmbeddedRocksDBStateBackend(enableIncrementalCheckpointing);
-        this.rocksDBStateBackend.setLogger(LOG);
     }
 
     /** @deprecated Use {@link #RocksDBStateBackend(StateBackend)} instead. */
@@ -280,6 +279,13 @@ public class RocksDBStateBackend extends AbstractManagedMemoryStateBackend
      */
     public StateBackend getCheckpointBackend() {
         return checkpointStreamBackend;
+    }
+
+    @Override
+    public boolean supportsNoClaimRestoreMode() {
+        // We are able to create CheckpointType#FULL_CHECKPOINT. (we might potentially reupload some
+        // shared files when taking incremental snapshots)
+        return true;
     }
 
     // ------------------------------------------------------------------------
@@ -588,7 +594,7 @@ public class RocksDBStateBackend extends AbstractManagedMemoryStateBackend
 
     @VisibleForTesting
     static void ensureRocksDBIsLoaded(String tempDirectory) throws IOException {
-        EmbeddedRocksDBStateBackend.ensureRocksDBIsLoaded(tempDirectory, LOG);
+        EmbeddedRocksDBStateBackend.ensureRocksDBIsLoaded(tempDirectory);
     }
 
     @VisibleForTesting

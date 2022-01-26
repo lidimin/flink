@@ -26,13 +26,16 @@ import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.api.internal.TableEnvironmentInternal;
+import org.apache.flink.table.catalog.CatalogBaseTable;
 import org.apache.flink.table.catalog.CatalogPartitionSpec;
-import org.apache.flink.table.catalog.CatalogPropertiesUtil;
 import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.CatalogView;
+import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.hive.HiveCatalog;
 import org.apache.flink.table.catalog.hive.HiveTestUtils;
 import org.apache.flink.table.delegation.Parser;
+import org.apache.flink.table.operations.DescribeTableOperation;
 import org.apache.flink.table.operations.command.ClearOperation;
 import org.apache.flink.table.operations.command.HelpOperation;
 import org.apache.flink.table.operations.command.QuitOperation;
@@ -55,6 +58,7 @@ import org.apache.hadoop.hive.ql.io.RCFileOutputFormat;
 import org.apache.hadoop.hive.ql.io.orc.OrcInputFormat;
 import org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat;
 import org.apache.hadoop.hive.ql.io.orc.OrcSerde;
+import org.apache.hadoop.hive.ql.udf.generic.GenericUDAFCount;
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDFAbs;
 import org.apache.hadoop.hive.serde.serdeConstants;
 import org.apache.hadoop.hive.serde2.columnar.LazyBinaryColumnarSerDe;
@@ -99,7 +103,7 @@ public class HiveDialectITCase {
                         HiveConf.ConfVars.METASTORE_DISALLOW_INCOMPATIBLE_COL_TYPE_CHANGES, false);
         hiveCatalog.open();
         warehouse = hiveCatalog.getHiveConf().getVar(HiveConf.ConfVars.METASTOREWAREHOUSE);
-        tableEnv = HiveTestUtils.createTableEnvWithBlinkPlannerBatchMode();
+        tableEnv = HiveTestUtils.createTableEnvInBatchMode();
         tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
         tableEnv.registerCatalog(hiveCatalog.getName(), hiveCatalog);
         tableEnv.useCatalog(hiveCatalog.getName());
@@ -149,7 +153,6 @@ public class HiveDialectITCase {
         tableEnv.executeSql("create database db1 comment 'db1 comment'");
         Database db = hiveCatalog.getHiveDatabase("db1");
         assertEquals("db1 comment", db.getDescription());
-        assertFalse(Boolean.parseBoolean(db.getParameters().get(CatalogPropertiesUtil.IS_GENERIC)));
 
         String db2Location = warehouse + "/db2_location";
         tableEnv.executeSql(
@@ -167,8 +170,6 @@ public class HiveDialectITCase {
         tableEnv.executeSql("create database db1 with dbproperties('k1'='v1')");
         tableEnv.executeSql("alter database db1 set dbproperties ('k1'='v11','k2'='v2')");
         Database db = hiveCatalog.getHiveDatabase("db1");
-        // there's an extra is_generic property
-        assertEquals(3, db.getParametersSize());
         assertEquals("v11", db.getParameters().get("k1"));
         assertEquals("v2", db.getParameters().get("k2"));
 
@@ -259,6 +260,27 @@ public class HiveDialectITCase {
         tableEnv.executeSql("create table if not exists tbl5 (m map<bigint,string>)");
         hiveTable = hiveCatalog.getHiveTable(new ObjectPath("default", "tbl5"));
         assertEquals(createdTimeForTableExists, hiveTable.getCreateTime());
+
+        // test describe table
+        Parser parser = ((TableEnvironmentInternal) tableEnv).getParser();
+        DescribeTableOperation operation =
+                (DescribeTableOperation) parser.parse("desc tbl1").get(0);
+        assertFalse(operation.isExtended());
+        assertEquals(
+                ObjectIdentifier.of(hiveCatalog.getName(), "default", "tbl1"),
+                operation.getSqlIdentifier());
+
+        operation = (DescribeTableOperation) parser.parse("describe default.tbl2").get(0);
+        assertFalse(operation.isExtended());
+        assertEquals(
+                ObjectIdentifier.of(hiveCatalog.getName(), "default", "tbl2"),
+                operation.getSqlIdentifier());
+
+        operation = (DescribeTableOperation) parser.parse("describe extended tbl3").get(0);
+        assertTrue(operation.isExtended());
+        assertEquals(
+                ObjectIdentifier.of(hiveCatalog.getName(), "default", "tbl3"),
+                operation.getSqlIdentifier());
     }
 
     @Test
@@ -540,20 +562,20 @@ public class HiveDialectITCase {
         tableEnv.executeSql(
                 "create view v(vx) comment 'v comment' tblproperties ('k1'='v1') as select x from tbl");
         ObjectPath viewPath = new ObjectPath("default", "v");
-        Table hiveView = hiveCatalog.getHiveTable(viewPath);
-        assertEquals(TableType.VIRTUAL_VIEW.name(), hiveView.getTableType());
-        assertEquals("vx", hiveView.getSd().getCols().get(0).getName());
-        assertEquals("v1", hiveView.getParameters().get("k1"));
+        CatalogBaseTable catalogBaseTable = hiveCatalog.getTable(viewPath);
+        assertTrue(catalogBaseTable instanceof CatalogView);
+        assertEquals("vx", catalogBaseTable.getUnresolvedSchema().getColumns().get(0).getName());
+        assertEquals("v1", catalogBaseTable.getOptions().get("k1"));
 
         // change properties
         tableEnv.executeSql("alter view v set tblproperties ('k1'='v11')");
-        hiveView = hiveCatalog.getHiveTable(viewPath);
-        assertEquals("v11", hiveView.getParameters().get("k1"));
+        catalogBaseTable = hiveCatalog.getTable(viewPath);
+        assertEquals("v11", catalogBaseTable.getOptions().get("k1"));
 
         // change query
         tableEnv.executeSql("alter view v as select y from tbl");
-        hiveView = hiveCatalog.getHiveTable(viewPath);
-        assertEquals("y", hiveView.getSd().getCols().get(0).getName());
+        catalogBaseTable = hiveCatalog.getTable(viewPath);
+        assertEquals("y", catalogBaseTable.getUnresolvedSchema().getColumns().get(0).getName());
 
         // rename
         tableEnv.executeSql("alter view v rename to v1");
@@ -609,6 +631,35 @@ public class HiveDialectITCase {
                 queryResult(tableEnv.sqlQuery("select temp_abs(x) from `default`.src")).toString());
         // drop the function
         tableEnv.executeSql("drop temporary function temp_abs");
+        functions = tableEnv.listUserDefinedFunctions();
+        assertEquals(0, functions.length);
+        tableEnv.executeSql("drop temporary function if exists foo");
+    }
+
+    @Test
+    public void testTemporaryFunctionUDAF() throws Exception {
+        // create temp function
+        tableEnv.executeSql(
+                String.format(
+                        "create temporary function temp_count as '%s'",
+                        GenericUDAFCount.class.getName()));
+        String[] functions = tableEnv.listUserDefinedFunctions();
+        assertArrayEquals(new String[] {"temp_count"}, functions);
+        // call the function
+        tableEnv.executeSql("create table src(x int)");
+        tableEnv.executeSql("insert into src values (1),(-1)").await();
+        assertEquals(
+                "[+I[2]]",
+                queryResult(tableEnv.sqlQuery("select temp_count(x) from src")).toString());
+        // switch DB and the temp function can still be used
+        tableEnv.executeSql("create database db1");
+        tableEnv.useDatabase("db1");
+        assertEquals(
+                "[+I[2]]",
+                queryResult(tableEnv.sqlQuery("select temp_count(x) from `default`.src"))
+                        .toString());
+        // drop the function
+        tableEnv.executeSql("drop temporary function temp_count");
         functions = tableEnv.listUserDefinedFunctions();
         assertEquals(0, functions.length);
         tableEnv.executeSql("drop temporary function if exists foo");

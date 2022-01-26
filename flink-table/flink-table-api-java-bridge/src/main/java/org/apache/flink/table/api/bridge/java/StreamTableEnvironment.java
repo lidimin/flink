@@ -30,12 +30,14 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.api.StatementSet;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableConfig;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.internal.StreamTableEnvironmentImpl;
-import org.apache.flink.table.descriptors.ConnectorDescriptor;
-import org.apache.flink.table.descriptors.StreamTableDescriptor;
+import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.table.connector.sink.DynamicTableSink;
+import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.functions.AggregateFunction;
 import org.apache.flink.table.functions.TableAggregateFunction;
@@ -91,7 +93,9 @@ public interface StreamTableEnvironment extends TableEnvironment {
      *     TableEnvironment}.
      */
     static StreamTableEnvironment create(StreamExecutionEnvironment executionEnvironment) {
-        return create(executionEnvironment, EnvironmentSettings.newInstance().build());
+        return create(
+                executionEnvironment,
+                EnvironmentSettings.fromConfiguration(executionEnvironment.getConfiguration()));
     }
 
     /**
@@ -228,6 +232,7 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * @param dataStream The {@link DataStream} to be converted.
      * @param <T> The external type of the {@link DataStream}.
      * @return The converted {@link Table}.
+     * @see #fromChangelogStream(DataStream)
      */
     <T> Table fromDataStream(DataStream<T> dataStream);
 
@@ -300,7 +305,7 @@ public interface StreamTableEnvironment extends TableEnvironment {
      *     // physical columns will be derived automatically
      *
      *     Schema.newBuilder()
-     *         .columnByMetadata("rowtime", "TIMESTAMP(3)") // extract timestamp into a table column
+     *         .columnByMetadata("rowtime", "TIMESTAMP_LTZ(3)") // extract timestamp into a column
      *         .watermark("rowtime", "SOURCE_WATERMARK()")  // declare watermarks propagation
      *         .build()
      *
@@ -314,11 +319,124 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * </pre>
      *
      * @param dataStream The {@link DataStream} to be converted.
-     * @param schema customized schema for the final table.
+     * @param schema The customized schema for the final table.
      * @param <T> The external type of the {@link DataStream}.
      * @return The converted {@link Table}.
+     * @see #fromChangelogStream(DataStream, Schema)
      */
     <T> Table fromDataStream(DataStream<T> dataStream, Schema schema);
+
+    /**
+     * Converts the given {@link DataStream} of changelog entries into a {@link Table}.
+     *
+     * <p>Compared to {@link #fromDataStream(DataStream)}, this method consumes instances of {@link
+     * Row} and evaluates the {@link RowKind} flag that is contained in every record during runtime.
+     * The runtime behavior is similar to that of a {@link DynamicTableSource}.
+     *
+     * <p>This method expects a changelog containing all kinds of changes (enumerated in {@link
+     * RowKind}) as the default {@link ChangelogMode}. Use {@link #fromChangelogStream(DataStream,
+     * Schema, ChangelogMode)} to limit the kinds of changes (e.g. for upsert mode).
+     *
+     * <p>Column names and types of the {@link Table} are automatically derived from the {@link
+     * TypeInformation} of the {@link DataStream}. If the outermost record's {@link TypeInformation}
+     * is a {@link CompositeType}, it will be flattened in the first level. {@link TypeInformation}
+     * that cannot be represented as one of the listed {@link DataTypes} will be treated as a
+     * black-box {@link DataTypes#RAW(Class, TypeSerializer)} type. Thus, composite nested fields
+     * will not be accessible.
+     *
+     * <p>By default, the stream record's timestamp and watermarks are not propagated unless
+     * explicitly declared via {@link #fromChangelogStream(DataStream, Schema)}.
+     *
+     * @param dataStream The changelog stream of {@link Row}.
+     * @return The converted {@link Table}.
+     */
+    Table fromChangelogStream(DataStream<Row> dataStream);
+
+    /**
+     * Converts the given {@link DataStream} of changelog entries into a {@link Table}.
+     *
+     * <p>Compared to {@link #fromDataStream(DataStream)}, this method consumes instances of {@link
+     * Row} and evaluates the {@link RowKind} flag that is contained in every record during runtime.
+     * The runtime behavior is similar to that of a {@link DynamicTableSource}.
+     *
+     * <p>This method expects a changelog containing all kinds of changes (enumerated in {@link
+     * RowKind}) as the default {@link ChangelogMode}. Use {@link #fromChangelogStream(DataStream,
+     * Schema, ChangelogMode)} to limit the kinds of changes (e.g. for upsert mode).
+     *
+     * <p>Column names and types of the {@link Table} are automatically derived from the {@link
+     * TypeInformation} of the {@link DataStream}. If the outermost record's {@link TypeInformation}
+     * is a {@link CompositeType}, it will be flattened in the first level. {@link TypeInformation}
+     * that cannot be represented as one of the listed {@link DataTypes} will be treated as a
+     * black-box {@link DataTypes#RAW(Class, TypeSerializer)} type. Thus, composite nested fields
+     * will not be accessible.
+     *
+     * <p>By default, the stream record's timestamp and watermarks are not propagated unless
+     * explicitly declared.
+     *
+     * <p>This method allows to declare a {@link Schema} for the resulting table. The declaration is
+     * similar to a {@code CREATE TABLE} DDL in SQL and allows to:
+     *
+     * <ul>
+     *   <li>enrich or overwrite automatically derived columns with a custom {@link DataType}
+     *   <li>reorder columns
+     *   <li>add computed or metadata columns next to the physical columns
+     *   <li>access a stream record's timestamp
+     *   <li>declare a watermark strategy or propagate the {@link DataStream} watermarks
+     *   <li>declare a primary key
+     * </ul>
+     *
+     * <p>See {@link #fromDataStream(DataStream, Schema)} for more information and examples on how
+     * to declare a {@link Schema}.
+     *
+     * @param dataStream The changelog stream of {@link Row}.
+     * @param schema The customized schema for the final table.
+     * @return The converted {@link Table}.
+     */
+    Table fromChangelogStream(DataStream<Row> dataStream, Schema schema);
+
+    /**
+     * Converts the given {@link DataStream} of changelog entries into a {@link Table}.
+     *
+     * <p>Compared to {@link #fromDataStream(DataStream)}, this method consumes instances of {@link
+     * Row} and evaluates the {@link RowKind} flag that is contained in every record during runtime.
+     * The runtime behavior is similar to that of a {@link DynamicTableSource}.
+     *
+     * <p>This method requires an explicitly declared {@link ChangelogMode}. For example, use {@link
+     * ChangelogMode#upsert()} if the stream will not contain {@link RowKind#UPDATE_BEFORE}, or
+     * {@link ChangelogMode#insertOnly()} for non-updating streams.
+     *
+     * <p>Column names and types of the {@link Table} are automatically derived from the {@link
+     * TypeInformation} of the {@link DataStream}. If the outermost record's {@link TypeInformation}
+     * is a {@link CompositeType}, it will be flattened in the first level. {@link TypeInformation}
+     * that cannot be represented as one of the listed {@link DataTypes} will be treated as a
+     * black-box {@link DataTypes#RAW(Class, TypeSerializer)} type. Thus, composite nested fields
+     * will not be accessible.
+     *
+     * <p>By default, the stream record's timestamp and watermarks are not propagated unless
+     * explicitly declared.
+     *
+     * <p>This method allows to declare a {@link Schema} for the resulting table. The declaration is
+     * similar to a {@code CREATE TABLE} DDL in SQL and allows to:
+     *
+     * <ul>
+     *   <li>enrich or overwrite automatically derived columns with a custom {@link DataType}
+     *   <li>reorder columns
+     *   <li>add computed or metadata columns next to the physical columns
+     *   <li>access a stream record's timestamp
+     *   <li>declare a watermark strategy or propagate the {@link DataStream} watermarks
+     *   <li>declare a primary key
+     * </ul>
+     *
+     * <p>See {@link #fromDataStream(DataStream, Schema)} for more information and examples of how
+     * to declare a {@link Schema}.
+     *
+     * @param dataStream The changelog stream of {@link Row}.
+     * @param schema The customized schema for the final table.
+     * @param changelogMode The expected kinds of changes in the incoming changelog.
+     * @return The converted {@link Table}.
+     */
+    Table fromChangelogStream(
+            DataStream<Row> dataStream, Schema schema, ChangelogMode changelogMode);
 
     /**
      * Creates a view from the given {@link DataStream} in a given path. Registered views can be
@@ -351,7 +469,7 @@ public interface StreamTableEnvironment extends TableEnvironment {
      *
      * @param path The path under which the {@link DataStream} is created. See also the {@link
      *     TableEnvironment} class description for the format of the path.
-     * @param schema customized schema for the final table.
+     * @param schema The customized schema for the final table.
      * @param dataStream The {@link DataStream} out of which to create the view.
      * @param <T> The type of the {@link DataStream}.
      */
@@ -376,9 +494,10 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * <p>If the input table contains a single rowtime column, it will be propagated into a stream
      * record's timestamp. Watermarks will be propagated as well.
      *
-     * @param table The {@link Table} to convert.
+     * @param table The {@link Table} to convert. It must be insert-only.
      * @return The converted {@link DataStream}.
      * @see #toDataStream(Table, AbstractDataType)
+     * @see #toChangelogStream(Table)
      */
     DataStream<Row> toDataStream(Table table);
 
@@ -391,17 +510,18 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * <p>This method is a shortcut for:
      *
      * <pre>
-     *     tableEnv.toDataStream(table, DataTypes.of(class))
+     *     tableEnv.toDataStream(table, DataTypes.of(targetClass))
      * </pre>
      *
      * <p>Calling this method with a class of {@link Row} will redirect to {@link
      * #toDataStream(Table)}.
      *
-     * @param table The {@link Table} to convert.
+     * @param table The {@link Table} to convert. It must be insert-only.
      * @param targetClass The {@link Class} that decides about the final external representation in
      *     {@link DataStream} records.
      * @param <T> External record.
      * @return The converted {@link DataStream}.
+     * @see #toChangelogStream(Table, Schema)
      */
     <T> DataStream<T> toDataStream(Table table, Class<T> targetClass);
 
@@ -444,14 +564,174 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * <p>If the input table contains a single rowtime column, it will be propagated into a stream
      * record's timestamp. Watermarks will be propagated as well.
      *
-     * @param table The {@link Table} to convert.
+     * @param table The {@link Table} to convert. It must be insert-only.
      * @param targetDataType The {@link DataType} that decides about the final external
      *     representation in {@link DataStream} records.
      * @param <T> External record.
      * @return The converted {@link DataStream}.
      * @see #toDataStream(Table)
+     * @see #toChangelogStream(Table, Schema)
      */
     <T> DataStream<T> toDataStream(Table table, AbstractDataType<?> targetDataType);
+
+    /**
+     * Converts the given {@link Table} into a {@link DataStream} of changelog entries.
+     *
+     * <p>Compared to {@link #toDataStream(Table)}, this method produces instances of {@link Row}
+     * and sets the {@link RowKind} flag that is contained in every record during runtime. The
+     * runtime behavior is similar to that of a {@link DynamicTableSink}.
+     *
+     * <p>This method can emit a changelog containing all kinds of changes (enumerated in {@link
+     * RowKind}) that the given updating table requires as the default {@link ChangelogMode}. Use
+     * {@link #toChangelogStream(Table, Schema, ChangelogMode)} to limit the kinds of changes (e.g.
+     * for upsert mode).
+     *
+     * <p>Note that the type system of the table ecosystem is richer than the one of the DataStream
+     * API. The table runtime will make sure to properly serialize the output records to the first
+     * operator of the DataStream API. Afterwards, the {@link Types} semantics of the DataStream API
+     * need to be considered.
+     *
+     * <p>If the input table contains a single rowtime column, it will be propagated into a stream
+     * record's timestamp. Watermarks will be propagated as well.
+     *
+     * @param table The {@link Table} to convert. It can be updating or insert-only.
+     * @return The converted changelog stream of {@link Row}.
+     */
+    DataStream<Row> toChangelogStream(Table table);
+
+    /**
+     * Converts the given {@link Table} into a {@link DataStream} of changelog entries.
+     *
+     * <p>Compared to {@link #toDataStream(Table)}, this method produces instances of {@link Row}
+     * and sets the {@link RowKind} flag that is contained in every record during runtime. The
+     * runtime behavior is similar to that of a {@link DynamicTableSink}.
+     *
+     * <p>This method can emit a changelog containing all kinds of changes (enumerated in {@link
+     * RowKind}) that the given updating table requires as the default {@link ChangelogMode}. Use
+     * {@link #toChangelogStream(Table, Schema, ChangelogMode)} to limit the kinds of changes (e.g.
+     * for upsert mode).
+     *
+     * <p>The given {@link Schema} is used to configure the table runtime to convert columns and
+     * internal data structures to the desired representation. The following example shows how to
+     * convert a table column into a POJO type.
+     *
+     * <pre>
+     *     // given a Table of (id BIGINT, payload ROW < name STRING , age INT >)
+     *
+     *     public static class MyPojo {
+     *         public String name;
+     *         public Integer age;
+     *
+     *         // default constructor for DataStream API
+     *         public MyPojo() {}
+     *
+     *         // fully assigning constructor for field order in Table API
+     *         public MyPojo(String name, Integer age) {
+     *             this.name = name;
+     *             this.age = age;
+     *         }
+     *     }
+     *
+     *     tableEnv.toChangelogStream(
+     *         table,
+     *         Schema.newBuilder()
+     *             .column("id", DataTypes.BIGINT())
+     *             .column("payload", DataTypes.of(MyPojo.class)) // force an implicit conversion
+     *             .build());
+     * </pre>
+     *
+     * <p>Note that the type system of the table ecosystem is richer than the one of the DataStream
+     * API. The table runtime will make sure to properly serialize the output records to the first
+     * operator of the DataStream API. Afterwards, the {@link Types} semantics of the DataStream API
+     * need to be considered.
+     *
+     * <p>If the input table contains a single rowtime column, it will be propagated into a stream
+     * record's timestamp. Watermarks will be propagated as well.
+     *
+     * <p>If the rowtime should not be a concrete field in the final {@link Row} anymore, or the
+     * schema should be symmetrical for both {@link #fromChangelogStream} and {@link
+     * #toChangelogStream}, the rowtime can also be declared as a metadata column that will be
+     * propagated into a stream record's timestamp. It is possible to declare a schema without
+     * physical/regular columns. In this case, those columns will be automatically derived and
+     * implicitly put at the beginning of the schema declaration.
+     *
+     * <p>The following examples illustrate common schema declarations and their semantics:
+     *
+     * <pre>
+     *     // given a Table of (id INT, name STRING, my_rowtime TIMESTAMP_LTZ(3))
+     *
+     *     // === EXAMPLE 1 ===
+     *
+     *     // no physical columns defined, they will be derived automatically,
+     *     // the last derived physical column will be skipped in favor of the metadata column
+     *
+     *     Schema.newBuilder()
+     *         .columnByMetadata("rowtime", "TIMESTAMP_LTZ(3)")
+     *         .build()
+     *
+     *     // equal to: CREATE TABLE (id INT, name STRING, rowtime TIMESTAMP_LTZ(3) METADATA)
+     *
+     *     // === EXAMPLE 2 ===
+     *
+     *     // physical columns defined, all columns must be defined
+     *
+     *     Schema.newBuilder()
+     *         .column("id", "INT")
+     *         .column("name", "STRING")
+     *         .columnByMetadata("rowtime", "TIMESTAMP_LTZ(3)")
+     *         .build()
+     *
+     *     // equal to: CREATE TABLE (id INT, name STRING, rowtime TIMESTAMP_LTZ(3) METADATA)
+     * </pre>
+     *
+     * @param table The {@link Table} to convert. It can be updating or insert-only.
+     * @param targetSchema The {@link Schema} that decides about the final external representation
+     *     in {@link DataStream} records.
+     * @return The converted changelog stream of {@link Row}.
+     */
+    DataStream<Row> toChangelogStream(Table table, Schema targetSchema);
+
+    /**
+     * Converts the given {@link Table} into a {@link DataStream} of changelog entries.
+     *
+     * <p>Compared to {@link #toDataStream(Table)}, this method produces instances of {@link Row}
+     * and sets the {@link RowKind} flag that is contained in every record during runtime. The
+     * runtime behavior is similar to that of a {@link DynamicTableSink}.
+     *
+     * <p>This method requires an explicitly declared {@link ChangelogMode}. For example, use {@link
+     * ChangelogMode#upsert()} if the stream will not contain {@link RowKind#UPDATE_BEFORE}, or
+     * {@link ChangelogMode#insertOnly()} for non-updating streams.
+     *
+     * <p>Note that the type system of the table ecosystem is richer than the one of the DataStream
+     * API. The table runtime will make sure to properly serialize the output records to the first
+     * operator of the DataStream API. Afterwards, the {@link Types} semantics of the DataStream API
+     * need to be considered.
+     *
+     * <p>If the input table contains a single rowtime column, it will be propagated into a stream
+     * record's timestamp. Watermarks will be propagated as well. However, it is also possible to
+     * write out the rowtime as a metadata column. See {@link #toChangelogStream(Table, Schema)} for
+     * more information and examples on how to declare a {@link Schema}.
+     *
+     * @param table The {@link Table} to convert. It can be updating or insert-only.
+     * @param targetSchema The {@link Schema} that decides about the final external representation
+     *     in {@link DataStream} records.
+     * @param changelogMode The required kinds of changes in the result changelog. An exception will
+     *     be thrown if the given updating table cannot be represented in this changelog mode.
+     * @return The converted changelog stream of {@link Row}.
+     */
+    DataStream<Row> toChangelogStream(
+            Table table, Schema targetSchema, ChangelogMode changelogMode);
+
+    /**
+     * Returns a {@link StatementSet} that integrates with the Java-specific {@link DataStream} API.
+     *
+     * <p>It accepts pipelines defined by DML statements or {@link Table} objects. The planner can
+     * optimize all added statements together and then either submit them as one job or attach them
+     * to the underlying {@link StreamExecutionEnvironment}.
+     *
+     * @return statement set builder for the Java-specific {@link DataStream} API
+     */
+    StreamStatementSet createStatementSet();
 
     /**
      * Converts the given {@link DataStream} into a {@link Table} with specified field names.
@@ -546,7 +826,12 @@ public interface StreamTableEnvironment extends TableEnvironment {
      *     of the {@code Table}.
      * @param <T> The type of the {@link DataStream}.
      * @return The converted {@link Table}.
+     * @deprecated Use {@link #fromDataStream(DataStream, Schema)} instead. In most cases, {@link
+     *     #fromDataStream(DataStream)} should already be sufficient. It integrates with the new
+     *     type system and supports all kinds of {@link DataTypes} that the table runtime can
+     *     consume. The semantics might be slightly different for raw and structured types.
      */
+    @Deprecated
     <T> Table fromDataStream(DataStream<T> dataStream, Expression... fields);
 
     /**
@@ -730,7 +1015,13 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * @param fields The fields expressions to map original fields of the DataStream to the fields
      *     of the View.
      * @param <T> The type of the {@link DataStream}.
+     * @deprecated Use {@link #createTemporaryView(String, DataStream, Schema)} instead. In most
+     *     cases, {@link #createTemporaryView(String, DataStream)} should already be sufficient. It
+     *     integrates with the new type system and supports all kinds of {@link DataTypes} that the
+     *     table runtime can consume. The semantics might be slightly different for raw and
+     *     structured types.
      */
+    @Deprecated
     <T> void createTemporaryView(String path, DataStream<T> dataStream, Expression... fields);
 
     /**
@@ -751,7 +1042,13 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * @param clazz The class of the type of the resulting {@link DataStream}.
      * @param <T> The type of the resulting {@link DataStream}.
      * @return The converted {@link DataStream}.
+     * @deprecated Use {@link #toDataStream(Table, Class)} instead. It integrates with the new type
+     *     system and supports all kinds of {@link DataTypes} that the table runtime can produce.
+     *     The semantics might be slightly different for raw and structured types. Use {@code
+     *     toDataStream(DataTypes.of(TypeInformation.of(Class)))} if {@link TypeInformation} should
+     *     be used as source of truth.
      */
+    @Deprecated
     <T> DataStream<T> toAppendStream(Table table, Class<T> clazz);
 
     /**
@@ -773,7 +1070,13 @@ public interface StreamTableEnvironment extends TableEnvironment {
      *     DataStream}.
      * @param <T> The type of the resulting {@link DataStream}.
      * @return The converted {@link DataStream}.
+     * @deprecated Use {@link #toDataStream(Table, Class)} instead. It integrates with the new type
+     *     system and supports all kinds of {@link DataTypes} that the table runtime can produce.
+     *     The semantics might be slightly different for raw and structured types. Use {@code
+     *     toDataStream(DataTypes.of(TypeInformation.of(Class)))} if {@link TypeInformation} should
+     *     be used as source of truth.
      */
+    @Deprecated
     <T> DataStream<T> toAppendStream(Table table, TypeInformation<T> typeInfo);
 
     /**
@@ -796,7 +1099,11 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * @param clazz The class of the requested record type.
      * @param <T> The type of the requested record type.
      * @return The converted {@link DataStream}.
+     * @deprecated Use {@link #toChangelogStream(Table, Schema)} instead. It integrates with the new
+     *     type system and supports all kinds of {@link DataTypes} and every {@link ChangelogMode}
+     *     that the table runtime can produce.
      */
+    @Deprecated
     <T> DataStream<Tuple2<Boolean, T>> toRetractStream(Table table, Class<T> clazz);
 
     /**
@@ -819,48 +1126,12 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * @param typeInfo The {@link TypeInformation} of the requested record type.
      * @param <T> The type of the requested record type.
      * @return The converted {@link DataStream}.
+     * @deprecated Use {@link #toChangelogStream(Table, Schema)} instead. It integrates with the new
+     *     type system and supports all kinds of {@link DataTypes} and every {@link ChangelogMode}
+     *     that the table runtime can produce.
      */
-    <T> DataStream<Tuple2<Boolean, T>> toRetractStream(Table table, TypeInformation<T> typeInfo);
-
-    /**
-     * Creates a table source and/or table sink from a descriptor.
-     *
-     * <p>Descriptors allow for declaring the communication to external systems in an
-     * implementation-agnostic way. The classpath is scanned for suitable table factories that match
-     * the desired configuration.
-     *
-     * <p>The following example shows how to read from a Kafka connector using a JSON format and
-     * registering a table source "MyTable" in append mode:
-     *
-     * <pre>{@code
-     * tableEnv
-     *   .connect(
-     *     new Kafka()
-     *       .version("0.11")
-     *       .topic("clicks")
-     *       .property("group.id", "click-group")
-     *       .startFromEarliest())
-     *   .withFormat(
-     *     new Json()
-     *       .jsonSchema("{...}")
-     *       .failOnMissingField(false))
-     *   .withSchema(
-     *     new Schema()
-     *       .field("user-name", "VARCHAR").from("u_name")
-     *       .field("count", "DECIMAL")
-     *       .field("proc-time", "TIMESTAMP").proctime())
-     *   .inAppendMode()
-     *   .createTemporaryTable("MyTable")
-     * }</pre>
-     *
-     * @param connectorDescriptor connector descriptor describing the external system
-     * @deprecated The SQL {@code CREATE TABLE} DDL is richer than this part of the API. This method
-     *     might be refactored in the next versions. Please use {@link #executeSql(String)
-     *     executeSql(ddl)} to register a table instead.
-     */
-    @Override
     @Deprecated
-    StreamTableDescriptor connect(ConnectorDescriptor connectorDescriptor);
+    <T> DataStream<Tuple2<Boolean, T>> toRetractStream(Table table, TypeInformation<T> typeInfo);
 
     /**
      * Triggers the program execution. The environment will execute all parts of the program.
@@ -874,7 +1145,10 @@ public interface StreamTableEnvironment extends TableEnvironment {
      * @param jobName Desired name of the job
      * @return The result of the job execution, containing elapsed time and accumulators.
      * @throws Exception which occurs during job execution.
+     * @deprecated Use {@link StreamExecutionEnvironment#execute(String)} instead or directly call
+     *     the execute methods of the Table API such as {@link #executeSql(String)}.
      */
+    @Deprecated
     @Override
     JobExecutionResult execute(String jobName) throws Exception;
 }

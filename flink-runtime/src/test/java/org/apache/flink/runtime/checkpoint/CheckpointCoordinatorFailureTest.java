@@ -22,27 +22,37 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.runtime.checkpoint.CheckpointCoordinatorTestingUtils.CheckpointCoordinatorBuilder;
 import org.apache.flink.runtime.checkpoint.channel.InputChannelInfo;
 import org.apache.flink.runtime.checkpoint.channel.ResultSubpartitionInfo;
-import org.apache.flink.runtime.concurrent.ManuallyTriggeredScheduledExecutor;
+import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.messages.checkpoint.AcknowledgeCheckpoint;
+import org.apache.flink.runtime.persistence.PossibleInconsistentStateException;
 import org.apache.flink.runtime.state.InputChannelStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.OperatorStreamStateHandle;
 import org.apache.flink.runtime.state.ResultSubpartitionStateHandle;
+import org.apache.flink.runtime.state.SharedStateRegistry;
 import org.apache.flink.runtime.state.StreamStateHandle;
+import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.concurrent.Executors;
+import org.apache.flink.util.concurrent.ManuallyTriggeredScheduledExecutor;
 
 import org.junit.Test;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static java.util.Collections.emptyList;
+import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
@@ -75,7 +85,10 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
         CheckpointCoordinator coord =
                 new CheckpointCoordinatorBuilder()
                         .setExecutionGraph(testGraph)
-                        .setCompletedCheckpointStore(new FailingCompletedCheckpointStore())
+                        .setCompletedCheckpointStore(
+                                new FailingCompletedCheckpointStore(
+                                        new Exception(
+                                                "The failing completed checkpoint store failed again... :-(")))
                         .setTimer(manuallyTriggeredScheduledExecutor)
                         .build();
 
@@ -160,25 +173,101 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
                 .discardState();
     }
 
-    private static final class FailingCompletedCheckpointStore implements CompletedCheckpointStore {
+    @Test
+    public void testCleanupForGenericFailure() throws Exception {
+        testStoringFailureHandling(new FlinkRuntimeException("Expected exception"), 1);
+    }
 
-        @Override
-        public void recover() throws Exception {
-            throw new UnsupportedOperationException("Not implemented.");
+    @Test
+    public void testCleanupOmissionForPossibleInconsistentStateException() throws Exception {
+        testStoringFailureHandling(new PossibleInconsistentStateException(), 0);
+    }
+
+    private void testStoringFailureHandling(Exception failure, int expectedCleanupCalls)
+            throws Exception {
+        final JobVertexID jobVertexID1 = new JobVertexID();
+
+        final ExecutionGraph graph =
+                new CheckpointCoordinatorTestingUtils.CheckpointExecutionGraphBuilder()
+                        .addJobVertex(jobVertexID1)
+                        .build();
+
+        final ExecutionVertex vertex = graph.getJobVertex(jobVertexID1).getTaskVertices()[0];
+        final ExecutionAttemptID attemptId = vertex.getCurrentExecutionAttempt().getAttemptId();
+
+        final StandaloneCheckpointIDCounter checkpointIDCounter =
+                new StandaloneCheckpointIDCounter();
+
+        final ManuallyTriggeredScheduledExecutor manuallyTriggeredScheduledExecutor =
+                new ManuallyTriggeredScheduledExecutor();
+
+        final CompletedCheckpointStore completedCheckpointStore =
+                new FailingCompletedCheckpointStore(failure);
+
+        final AtomicInteger cleanupCallCount = new AtomicInteger(0);
+        final CheckpointCoordinator checkpointCoordinator =
+                new CheckpointCoordinatorBuilder()
+                        .setExecutionGraph(graph)
+                        .setCheckpointIDCounter(checkpointIDCounter)
+                        .setCheckpointsCleaner(
+                                new CheckpointsCleaner() {
+
+                                    private static final long serialVersionUID =
+                                            2029876992397573325L;
+
+                                    @Override
+                                    public void cleanCheckpointOnFailedStoring(
+                                            CompletedCheckpoint completedCheckpoint,
+                                            Executor executor) {
+                                        cleanupCallCount.incrementAndGet();
+                                        super.cleanCheckpointOnFailedStoring(
+                                                completedCheckpoint, executor);
+                                    }
+                                })
+                        .setCompletedCheckpointStore(completedCheckpointStore)
+                        .setTimer(manuallyTriggeredScheduledExecutor)
+                        .build();
+        checkpointCoordinator.triggerCheckpoint(false);
+        manuallyTriggeredScheduledExecutor.triggerAll();
+
+        try {
+            checkpointCoordinator.receiveAcknowledgeMessage(
+                    new AcknowledgeCheckpoint(
+                            graph.getJobID(), attemptId, checkpointIDCounter.getLast()),
+                    "unknown location");
+            fail("CheckpointException should have been thrown.");
+        } catch (CheckpointException e) {
+            assertThat(
+                    e.getCheckpointFailureReason(),
+                    is(CheckpointFailureReason.FINALIZE_CHECKPOINT_FAILURE));
+        }
+
+        assertThat(cleanupCallCount.get(), is(expectedCleanupCalls));
+    }
+
+    private static final class FailingCompletedCheckpointStore
+            extends AbstractCompleteCheckpointStore {
+
+        private final Exception addCheckpointFailure;
+
+        public FailingCompletedCheckpointStore(Exception addCheckpointFailure) {
+            super(
+                    SharedStateRegistry.DEFAULT_FACTORY.create(
+                            Executors.directExecutor(), emptyList()));
+            this.addCheckpointFailure = addCheckpointFailure;
         }
 
         @Override
-        public void addCheckpoint(
+        public CompletedCheckpoint addCheckpointAndSubsumeOldestOne(
                 CompletedCheckpoint checkpoint,
                 CheckpointsCleaner checkpointsCleaner,
                 Runnable postCleanup)
                 throws Exception {
-            throw new Exception("The failing completed checkpoint store failed again... :-(");
+            throw addCheckpointFailure;
         }
 
         @Override
-        public CompletedCheckpoint getLatestCheckpoint(boolean isPreferCheckpointForRecovery)
-                throws Exception {
+        public CompletedCheckpoint getLatestCheckpoint() throws Exception {
             throw new UnsupportedOperationException("Not implemented.");
         }
 
@@ -190,7 +279,7 @@ public class CheckpointCoordinatorFailureTest extends TestLogger {
 
         @Override
         public List<CompletedCheckpoint> getAllCheckpoints() throws Exception {
-            throw new UnsupportedOperationException("Not implemented.");
+            return Collections.emptyList();
         }
 
         @Override

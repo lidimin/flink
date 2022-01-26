@@ -18,6 +18,7 @@
 
 package org.apache.flink.formats.csv;
 
+import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -43,19 +44,20 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
-import static org.apache.flink.formats.csv.CsvOptions.ALLOW_COMMENTS;
-import static org.apache.flink.formats.csv.CsvOptions.ARRAY_ELEMENT_DELIMITER;
-import static org.apache.flink.formats.csv.CsvOptions.DISABLE_QUOTE_CHARACTER;
-import static org.apache.flink.formats.csv.CsvOptions.ESCAPE_CHARACTER;
-import static org.apache.flink.formats.csv.CsvOptions.FIELD_DELIMITER;
-import static org.apache.flink.formats.csv.CsvOptions.IGNORE_PARSE_ERRORS;
-import static org.apache.flink.formats.csv.CsvOptions.NULL_LITERAL;
-import static org.apache.flink.formats.csv.CsvOptions.QUOTE_CHARACTER;
+import static org.apache.flink.formats.csv.CsvFormatOptions.ALLOW_COMMENTS;
+import static org.apache.flink.formats.csv.CsvFormatOptions.ARRAY_ELEMENT_DELIMITER;
+import static org.apache.flink.formats.csv.CsvFormatOptions.DISABLE_QUOTE_CHARACTER;
+import static org.apache.flink.formats.csv.CsvFormatOptions.ESCAPE_CHARACTER;
+import static org.apache.flink.formats.csv.CsvFormatOptions.FIELD_DELIMITER;
+import static org.apache.flink.formats.csv.CsvFormatOptions.IGNORE_PARSE_ERRORS;
+import static org.apache.flink.formats.csv.CsvFormatOptions.NULL_LITERAL;
+import static org.apache.flink.formats.csv.CsvFormatOptions.QUOTE_CHARACTER;
 
 /**
  * Format factory for providing configured instances of CSV to RowData {@link SerializationSchema}
  * and {@link DeserializationSchema}.
  */
+@Internal
 public final class CsvFormatFactory
         implements DeserializationFormatFactory, SerializationFormatFactory {
 
@@ -129,6 +131,19 @@ public final class CsvFormatFactory
         options.add(QUOTE_CHARACTER);
         options.add(ALLOW_COMMENTS);
         options.add(IGNORE_PARSE_ERRORS);
+        options.add(ARRAY_ELEMENT_DELIMITER);
+        options.add(ESCAPE_CHARACTER);
+        options.add(NULL_LITERAL);
+        return options;
+    }
+
+    @Override
+    public Set<ConfigOption<?>> forwardOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(FIELD_DELIMITER);
+        options.add(DISABLE_QUOTE_CHARACTER);
+        options.add(QUOTE_CHARACTER);
+        options.add(ALLOW_COMMENTS);
         options.add(ARRAY_ELEMENT_DELIMITER);
         options.add(ESCAPE_CHARACTER);
         options.add(NULL_LITERAL);

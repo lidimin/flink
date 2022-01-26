@@ -68,6 +68,8 @@ class SortMergeSubpartitionReader
     /** Sequence number of the next buffer to be sent to the consumer. */
     private int sequenceNumber;
 
+    private long totalBuffersSize;
+
     SortMergeSubpartitionReader(
             BufferAvailabilityListener listener, PartitionedFileReader fileReader) {
         this.availabilityListener = checkNotNull(listener);
@@ -86,6 +88,7 @@ class SortMergeSubpartitionReader
             if (buffer.isBuffer()) {
                 --dataBufferBacklog;
             }
+            totalBuffersSize -= buffer.getSize();
 
             Buffer lookAhead = buffersRead.peek();
             return BufferAndBacklog.fromBufferAndLookahead(
@@ -110,6 +113,7 @@ class SortMergeSubpartitionReader
             if (buffer.isBuffer()) {
                 ++dataBufferBacklog;
             }
+            totalBuffersSize += buffer.getSize();
         }
 
         if (notifyAvailable) {
@@ -185,6 +189,7 @@ class SortMergeSubpartitionReader
                 buffer.recycleBuffer();
             }
             buffersRead.clear();
+            dataBufferBacklog = 0;
         }
 
         releaseFuture.complete(null);
@@ -203,6 +208,12 @@ class SortMergeSubpartitionReader
     }
 
     @Override
+    public void acknowledgeAllDataProcessed() {
+        // in case of bounded partitions there is no upstream to acknowledge, we simply ignore
+        // the ack, as there are no checkpoints
+    }
+
+    @Override
     public Throwable getFailureCause() {
         synchronized (lock) {
             return failureCause;
@@ -210,17 +221,17 @@ class SortMergeSubpartitionReader
     }
 
     @Override
-    public boolean isAvailable(int numCreditsAvailable) {
+    public AvailabilityWithBacklog getAvailabilityAndBacklog(int numCreditsAvailable) {
         synchronized (lock) {
+            boolean isAvailable;
             if (isReleased) {
-                return true;
+                isAvailable = true;
+            } else if (buffersRead.isEmpty()) {
+                isAvailable = false;
+            } else {
+                isAvailable = numCreditsAvailable > 0 || !buffersRead.peek().isBuffer();
             }
-
-            if (buffersRead.isEmpty()) {
-                return false;
-            }
-
-            return numCreditsAvailable > 0 || !buffersRead.peek().isBuffer();
+            return new AvailabilityWithBacklog(isAvailable, dataBufferBacklog);
         }
     }
 
@@ -228,4 +239,14 @@ class SortMergeSubpartitionReader
     public int unsynchronizedGetNumberOfQueuedBuffers() {
         return Math.max(0, buffersRead.size());
     }
+
+    @Override
+    public int getNumberOfQueuedBuffers() {
+        synchronized (lock) {
+            return buffersRead.size();
+        }
+    }
+
+    @Override
+    public void notifyNewBufferSize(int newBufferSize) {}
 }

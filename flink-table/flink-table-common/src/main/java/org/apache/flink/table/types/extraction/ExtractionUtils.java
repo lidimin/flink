@@ -35,6 +35,7 @@ import org.apache.flink.shaded.asm7.org.objectweb.asm.Opcodes;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
@@ -187,7 +188,7 @@ public final class ExtractionUtils {
             }
         }
         throw extractionError(
-                "Could not to find a field named '%s' in class '%s' for structured type.",
+                "Could not find a field named '%s' in class '%s' for structured type.",
                 fieldName, clazz.getName());
     }
 
@@ -742,8 +743,8 @@ public final class ExtractionUtils {
 
     private static ClassReader getClassReader(Class<?> cls) {
         final String className = cls.getName().replaceFirst("^.*\\.", "") + ".class";
-        try {
-            return new ClassReader(cls.getResourceAsStream(className));
+        try (InputStream i = cls.getResourceAsStream(className)) {
+            return new ClassReader(i);
         } catch (IOException e) {
             throw new IllegalStateException("Could not instantiate ClassReader.", e);
         }
@@ -971,6 +972,33 @@ public final class ExtractionUtils {
      */
     public static Class<?> wrapperToPrimitive(final Class<?> cls) {
         return wrapperPrimitiveMap.get(cls);
+    }
+
+    /** Helper map for {@link #classForName(String, boolean, ClassLoader)}. */
+    private static final Map<String, Class<?>> primitiveNameMap = new HashMap<>();
+
+    static {
+        primitiveNameMap.put("int", Integer.TYPE);
+        primitiveNameMap.put("boolean", Boolean.TYPE);
+        primitiveNameMap.put("float", Float.TYPE);
+        primitiveNameMap.put("long", Long.TYPE);
+        primitiveNameMap.put("short", Short.TYPE);
+        primitiveNameMap.put("byte", Byte.TYPE);
+        primitiveNameMap.put("double", Double.TYPE);
+        primitiveNameMap.put("char", Character.TYPE);
+        primitiveNameMap.put("void", Void.TYPE);
+    }
+
+    /**
+     * Similar to {@link Class#forName(String, boolean, ClassLoader)} but resolves primitive names
+     * as well.
+     */
+    public static Class<?> classForName(String name, boolean initialize, ClassLoader classLoader)
+            throws ClassNotFoundException {
+        if (primitiveNameMap.containsKey(name)) {
+            return primitiveNameMap.get(name);
+        }
+        return Class.forName(name, initialize, classLoader);
     }
 
     // --------------------------------------------------------------------------------------------

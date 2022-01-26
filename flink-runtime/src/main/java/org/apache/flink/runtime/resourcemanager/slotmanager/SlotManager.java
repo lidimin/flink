@@ -18,14 +18,13 @@
 
 package org.apache.flink.runtime.resourcemanager.slotmanager;
 
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.clusterframework.types.SlotID;
 import org.apache.flink.runtime.instance.InstanceID;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
-import org.apache.flink.runtime.resourcemanager.SlotRequest;
 import org.apache.flink.runtime.resourcemanager.WorkerResourceSpec;
-import org.apache.flink.runtime.resourcemanager.exceptions.ResourceManagerException;
 import org.apache.flink.runtime.resourcemanager.registration.TaskExecutorConnection;
 import org.apache.flink.runtime.rest.messages.taskmanager.SlotInfo;
 import org.apache.flink.runtime.slots.ResourceRequirements;
@@ -74,8 +73,6 @@ public interface SlotManager extends AutoCloseable {
 
     Collection<SlotInfo> getAllocatedSlotsOf(InstanceID instanceID);
 
-    int getNumberPendingSlotRequests();
-
     /**
      * Starts the slot manager with the given leader id and resource manager actions.
      *
@@ -92,33 +89,19 @@ public interface SlotManager extends AutoCloseable {
     void suspend();
 
     /**
+     * Notifies the slot manager that the resource requirements for the given job should be cleared.
+     * The slot manager may assume that no further updates to the resource requirements will occur.
+     *
+     * @param jobId job for which to clear the requirements
+     */
+    void clearResourceRequirements(JobID jobId);
+
+    /**
      * Notifies the slot manager about the resource requirements of a job.
      *
      * @param resourceRequirements resource requirements of a job
      */
     void processResourceRequirements(ResourceRequirements resourceRequirements);
-
-    /**
-     * Requests a slot with the respective resource profile.
-     *
-     * @param slotRequest specifying the requested slot specs
-     * @return true if the slot request was registered; false if the request is a duplicate
-     * @throws ResourceManagerException if the slot request failed (e.g. not enough resources left)
-     */
-    default boolean registerSlotRequest(SlotRequest slotRequest) throws ResourceManagerException {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     * Cancels and removes a pending slot request with the given allocation id. If there is no such
-     * pending request, then nothing is done.
-     *
-     * @param allocationId identifying the pending slot request
-     * @return True if a pending slot request was found; otherwise false
-     */
-    default boolean unregisterSlotRequest(AllocationID allocationId) {
-        throw new UnsupportedOperationException();
-    }
 
     /**
      * Registers a new task manager at the slot manager. This will make the task managers slots

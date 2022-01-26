@@ -83,7 +83,6 @@ public class AdaptiveSchedulerITCase extends TestLogger {
         final Configuration conf = new Configuration();
 
         conf.set(JobManagerOptions.SCHEDULER, JobManagerOptions.SchedulerType.Adaptive);
-        conf.set(ClusterOptions.ENABLE_DECLARATIVE_RESOURCE_MANAGEMENT, true);
 
         return conf;
     }
@@ -125,7 +124,7 @@ public class AdaptiveSchedulerITCase extends TestLogger {
     private enum StopWithSavepointTestBehavior {
         NO_FAILURE,
         FAIL_ON_CHECKPOINT,
-        FAIL_ON_STOP,
+        FAIL_ON_CHECKPOINT_COMPLETE,
         FAIL_ON_FIRST_CHECKPOINT_ONLY
     }
 
@@ -173,7 +172,7 @@ public class AdaptiveSchedulerITCase extends TestLogger {
     @Test
     public void testStopWithSavepointFailOnStop() throws Exception {
         StreamExecutionEnvironment env =
-                getEnvWithSource(StopWithSavepointTestBehavior.FAIL_ON_STOP);
+                getEnvWithSource(StopWithSavepointTestBehavior.FAIL_ON_CHECKPOINT_COMPLETE);
         env.setRestartStrategy(RestartStrategies.fixedDelayRestart(Integer.MAX_VALUE, 0L));
 
         DummySource.resetForParallelism(PARALLELISM);
@@ -219,21 +218,30 @@ public class AdaptiveSchedulerITCase extends TestLogger {
 
         DummySource.awaitRunning();
 
-        // ensure failed savepoint files have been removed by now (this check is intentionally after
-        // the wait for the sources to be running again, due to instabilities observed)
-        File[] files = savepointDirectory.listFiles();
-        if (files.length > 0) {
-            fail(
-                    "Found unexpected files: "
-                            + Arrays.stream(files)
-                                    .map(File::getAbsolutePath)
-                                    .collect(Collectors.joining(", ")));
-        }
+        // ensure failed savepoint files have been removed from the directory.
+        // We execute this in a retry loop with a timeout, because the savepoint deletion happens
+        // asynchronously and is not bound to the job lifecycle. See FLINK-22493 for more details.
+        CommonTestUtils.waitUntilCondition(
+                () -> isDirectoryEmpty(savepointDirectory),
+                Deadline.fromNow(Duration.ofSeconds(10)));
 
         // trigger second savepoint
         final String savepoint =
                 client.stopWithSavepoint(false, savepointDirectory.getAbsolutePath()).get();
         assertThat(savepoint, containsString(savepointDirectory.getAbsolutePath()));
+    }
+
+    private boolean isDirectoryEmpty(File directory) {
+        File[] files = directory.listFiles();
+        if (files.length > 0) {
+            log.warn(
+                    "There are still unexpected files: {}",
+                    Arrays.stream(files)
+                            .map(File::getAbsolutePath)
+                            .collect(Collectors.joining(", ")));
+            return false;
+        }
+        return true;
     }
 
     private static StreamExecutionEnvironment getEnvWithSource(
@@ -249,7 +257,6 @@ public class AdaptiveSchedulerITCase extends TestLogger {
         private final StopWithSavepointTestBehavior behavior;
         private volatile boolean running = true;
         private static volatile CountDownLatch instancesRunning;
-        private volatile boolean checkpointComplete = false;
 
         public DummySource(StopWithSavepointTestBehavior behavior) {
             this.behavior = behavior;
@@ -280,9 +287,6 @@ public class AdaptiveSchedulerITCase extends TestLogger {
         @Override
         public void cancel() {
             running = false;
-            if (checkpointComplete && behavior == StopWithSavepointTestBehavior.FAIL_ON_STOP) {
-                throw new RuntimeException(behavior.name());
-            }
         }
 
         @Override
@@ -301,7 +305,9 @@ public class AdaptiveSchedulerITCase extends TestLogger {
 
         @Override
         public void notifyCheckpointComplete(long checkpointId) throws Exception {
-            checkpointComplete = true;
+            if (behavior == StopWithSavepointTestBehavior.FAIL_ON_CHECKPOINT_COMPLETE) {
+                throw new RuntimeException(behavior.name());
+            }
         }
     }
 

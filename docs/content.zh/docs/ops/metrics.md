@@ -243,7 +243,7 @@ class MyMapper extends RichMapFunction[Long,Long] {
 {{< /tab >}}
 {{< /tabs >}}
 
-Flink does not provide a default implementation for `Histogram`, but offers a {% gh_link flink-metrics/flink-metrics-dropwizard/src/main/java/org/apache/flink/dropwizard/metrics/DropwizardHistogramWrapper.java "Wrapper" %} that allows usage of Codahale/DropWizard histograms.
+Flink does not provide a default implementation for `Histogram`, but offers a {{< gh_link file="flink-metrics/flink-metrics-dropwizard/src/main/java/org/apache/flink/dropwizard/metrics/DropwizardHistogramWrapper.java" name="Wrapper" >}} that allows usage of Codahale/DropWizard histograms.
 To use this wrapper add the following dependency in your `pom.xml`:
 ```xml
 <dependency>
@@ -916,10 +916,15 @@ Metrics related to data exchange between task executors using netty network comm
       <td>Gauge</td>
     </tr>
     <tr>
-      <th rowspan="8">Task</th>
-      <td rowspan="2">Shuffle.Netty.Input.Buffers</td>
+      <th rowspan="20">Task</th>
+      <td rowspan="5">Shuffle.Netty.Input.Buffers</td>
       <td>inputQueueLength</td>
       <td>The number of queued input buffers.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>inputQueueSize</td>
+      <td>The real size of queued input buffers in bytes. The size for local input channels is always `0` since the local channel takes records directly from the output queue.</td>
       <td>Gauge</td>
     </tr>
     <tr>
@@ -938,9 +943,14 @@ Metrics related to data exchange between task executors using netty network comm
       <td>Gauge</td>
     </tr>
     <tr>
-      <td rowspan="2">Shuffle.Netty.Output.Buffers</td>
+      <td rowspan="3">Shuffle.Netty.Output.Buffers</td>
       <td>outputQueueLength</td>
       <td>The number of queued output buffers.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>outputQueueSize</td>
+      <td>The real size of queued output buffers in bytes.</td>
       <td>Gauge</td>
     </tr>
     <tr>
@@ -971,7 +981,6 @@ Metrics related to data exchange between task executors using netty network comm
       <td>Gauge</td>
     </tr>
     <tr>
-      <th rowspan="8"><strong>Task</strong></th>
       <td rowspan="8">Shuffle.Netty.Input</td>
       <td>numBytesInLocal</td>
       <td>The total number of bytes this task has read from a local source.</td>
@@ -1033,6 +1042,11 @@ Metrics related to data exchange between task executors using netty network comm
       <td>Gauge</td>
     </tr>
     <tr>
+      <td>numPendingTaskManagers</td>
+      <td>(only applicable to Native Kubernetes / YARN) The number of outstanding taskmanagers that Flink has requested.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
       <td>numRunningJobs</td>
       <td>The number of running jobs.</td>
       <td>Gauge</td>
@@ -1052,9 +1066,10 @@ Metrics related to data exchange between task executors using netty network comm
 
 ### Availability
 
-{{< hint warning >}}
-If [Reactive Mode]({{< ref "docs/deployment/elastic_scaling" >}}#reactive-mode) is enabled then these metrics, except `numRestarts`, do not work correctly.
-{{< /hint >}}
+The metrics in this table are available for each of the following job states: INITIALIZING, CREATED, RUNNING, RESTARTING, CANCELLING, FAILING.
+Whether these metrics are reported depends on the [metrics.job.status.enable]({{< ref "docs/deployment/config" >}}#metrics-job-status-enable) setting.
+
+<span class="label label-info">Evolving</span> The semantics of these metrics may change in later releases.
 
 <table class="table table-bordered">
   <thead>
@@ -1067,12 +1082,36 @@ If [Reactive Mode]({{< ref "docs/deployment/elastic_scaling" >}}#reactive-mode) 
   </thead>
   <tbody>
     <tr>
-      <th rowspan="5"><strong>Job (only available on JobManager)</strong></th>
-      <td>restartingTime</td>
-      <td>The time it took to restart the job, or how long the current restart has been in progress (in milliseconds).</td>
+      <th rowspan="3"><strong>Job (only available on JobManager)</strong></th>
+      <td>&lt;jobStatus&gt;State</td>
+      <td>For a given state, return 1 if the job is currently in that state, otherwise return 0.</td>
       <td>Gauge</td>
     </tr>
     <tr>
+      <td>&lt;jobStatus&gt;Time</td>
+      <td>For a given state, if the job is currently in that state, return the time (in milliseconds) since the job transitioned into that state, otherwise return 0.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>&lt;jobStatus&gt;TimeTotal</td>
+      <td>For a given state, return how much time (in milliseconds) the job has spent in that state in total.</td>
+      <td>Gauge</td>
+    </tr>
+  </tbody>
+</table>
+
+<table class="table table-bordered">
+  <thead>
+    <tr>
+      <th class="text-left" style="width: 18%">Scope</th>
+      <th class="text-left" style="width: 26%">Metrics</th>
+      <th class="text-left" style="width: 48%">Description</th>
+      <th class="text-left" style="width: 8%">Type</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th rowspan="4"><strong>Job (only available on JobManager)</strong></th>
       <td>uptime</td>
       <td>
         The time that the job has been running without interruption.
@@ -1103,10 +1142,6 @@ If [Reactive Mode]({{< ref "docs/deployment/elastic_scaling" >}}#reactive-mode) 
 
 {
 ### Checkpointing
-
-{{< hint warning >}}
-If [Reactive Mode]({{< ref "docs/deployment/elastic_scaling" >}}#reactive-mode) is enabled then the checkpointing metrics with the `Job` scope do not work correctly.
-{{< /hint >}}
 
 Note that for failed checkpoints, metrics are updated on a best efforts basis and may be not accurate.
 <table class="table table-bordered">
@@ -1195,7 +1230,7 @@ Certain RocksDB native metrics are available but disabled by default, you can fi
       <td>Histogram</td>
     </tr>
     <tr>
-      <th rowspan="14"><strong>Task</strong></th>
+      <th rowspan="20"><strong>Task</strong></th>
       <td>numBytesInLocal</td>
       <td><span class="label label-danger">Attention:</span> deprecated, use <a href="{{< ref "docs/ops/metrics" >}}#default-shuffle-service">Default shuffle service metrics</a>.</td>
       <td>Counter</td>
@@ -1266,14 +1301,45 @@ Certain RocksDB native metrics are available but disabled by default, you can fi
       <td>Meter</td>
     </tr>
     <tr>
-      <td>backPressuredTimeMsPerSecond</td>
-      <td>The time (in milliseconds) this task is back pressured per second.</td>
-      <td>Meter</td>
-    </tr>
-    <tr>
       <td>busyTimeMsPerSecond</td>
       <td>The time (in milliseconds) this task is busy (neither idle nor back pressured) per second. Can be NaN, if the value could not be calculated.</td>
-      <td>Meter</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>backPressuredTimeMsPerSecond</td>
+      <td>The time (in milliseconds) this task is back pressured (soft or hard) per second. It's a sum of softBackPressuredTimeMsPerSecond and hardBackPressuredTimeMsPerSecond.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>softBackPressuredTimeMsPerSecond</td>
+      <td>The time (in milliseconds) this task is softly back pressured per second. Softly back pressured task will be still responsive and capable of for example triggering unaligned checkpoints.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>hardBackPressuredTimeMsPerSecond</td>
+      <td>The time (in milliseconds) this task is back pressured in a hard way per second. During hard back pressured task is completely blocked and unresponsive preventing for example unaligned checkpoints from triggering.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>maxSoftBackPressuredTimeMs</td>
+      <td>Maximum recorded duration of a single consecutive period of the task being softly back pressured in the last sampling period. Please check softBackPressuredTimeMsPerSecond and hardBackPressuredTimeMsPerSecond for more information.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>maxHardBackPressuredTimeMs</td>
+      <td>Maximum recorded duration of a single consecutive period of the task being in the hard back pressure state in the last sampling period. Please check softBackPressuredTimeMsPerSecond and hardBackPressuredTimeMsPerSecond for more information.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td rowspan="2"><strong>Task (only if buffer debloating is enabled and in non-source tasks)</strong></td>
+      <td>estimatedTimeToConsumeBuffersMs</td>
+      <td>The estimated time (in milliseconds) by the buffer debloater to consume all of the buffered data in the network exchange preceding this task. This value is calculated by approximated amount of the in-flight data and calculated throughput.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>debloatedBufferSize</td>
+      <td>The desired buffer size (in bytes) calculated by the buffer debloater. Buffer debloater is trying to reduce buffer size when the amount of in-flight data (after taking into account current throughput) exceeds the configured target value.</td>
+      <td>Gauge</td>
     </tr>
     <tr>
       <th rowspan="6"><strong>Task/Operator</strong></th>
@@ -1642,7 +1708,7 @@ logged by `SystemResourcesMetricsInitializer` during the startup.
   </tbody>
 </table>
 
-## Latency tracking
+## End-to-End latency tracking
 
 Flink allows to track the latency of records travelling through the system. This feature is disabled by default.
 To enable the latency tracking you must set the `latencyTrackingInterval` to a positive number in either the
@@ -1670,6 +1736,17 @@ up an automated clock synchronisation service (like NTP) to avoid false latency 
 <span class="label label-danger">Warning</span> Enabling latency metrics can significantly impact the performance
 of the cluster (in particular for `subtask` granularity). It is highly recommended to only use them for debugging 
 purposes.
+
+## State access latency tracking
+
+Flink also allows to track the keyed state access latency for standard Flink state-backends or customized state backends which extending from `AbstractStateBackend`. This feature is disabled by default.
+To enable this feature you must set the `state.backend.latency-track.keyed-state-enabled` to true in the [Flink configuration]({{< ref "docs/deployment/config" >}}#state-backends-latency-tracking-options).
+
+Once tracking keyed state access latency is enabled, Flink will sample the state access latency every `N` access, in which `N` is defined by `state.backend.latency-track.sample-interval`.
+This configuration has a default value of 100. A smaller value will get more accurate results but have a higher performance impact since it is sampled more frequently.
+
+As the type of this latency metrics is histogram, `state.backend.latency-track.history-size` will control the maximum number of recorded values in history, which has the default value of 128.
+A larger value of this configuration will require more memory, but will provide a more accurate result.
 
 ## REST API integration
 
@@ -1813,12 +1890,12 @@ Request specific aggregated values for specific metrics:
   {
     "id": "metric1",
     "min": 1,
-    "max": 34,
+    "max": 34
   },
   {
     "id": "metric2",
     "min": 2,
-    "max": 14,
+    "max": 14
   }
 ]
 ```

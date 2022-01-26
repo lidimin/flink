@@ -23,13 +23,17 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.table.api.ExplainDetail;
 import org.apache.flink.table.api.StatementSet;
 import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.TableDescriptor;
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.api.TableResult;
+import org.apache.flink.table.catalog.ContextResolvedTable;
 import org.apache.flink.table.catalog.ObjectIdentifier;
+import org.apache.flink.table.catalog.ResolvedCatalogTable;
+import org.apache.flink.table.catalog.SchemaTranslator;
 import org.apache.flink.table.catalog.UnresolvedIdentifier;
-import org.apache.flink.table.operations.CatalogSinkModifyOperation;
 import org.apache.flink.table.operations.ModifyOperation;
 import org.apache.flink.table.operations.Operation;
+import org.apache.flink.table.operations.SinkModifyOperation;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -38,11 +42,11 @@ import java.util.stream.Collectors;
 
 /** Implementation for {@link StatementSet}. */
 @Internal
-class StatementSetImpl implements StatementSet {
-    private final TableEnvironmentInternal tableEnvironment;
-    private final List<ModifyOperation> operations = new ArrayList<>();
+public class StatementSetImpl<E extends TableEnvironmentInternal> implements StatementSet {
+    protected final E tableEnvironment;
+    protected final List<ModifyOperation> operations = new ArrayList<>();
 
-    protected StatementSetImpl(TableEnvironmentInternal tableEnvironment) {
+    protected StatementSetImpl(E tableEnvironment) {
         this.tableEnvironment = tableEnvironment;
     }
 
@@ -74,10 +78,45 @@ class StatementSetImpl implements StatementSet {
                 tableEnvironment.getParser().parseIdentifier(targetPath);
         ObjectIdentifier objectIdentifier =
                 tableEnvironment.getCatalogManager().qualifyIdentifier(unresolvedIdentifier);
+        ContextResolvedTable contextResolvedTable =
+                tableEnvironment.getCatalogManager().getTableOrError(objectIdentifier);
 
         operations.add(
-                new CatalogSinkModifyOperation(
-                        objectIdentifier,
+                new SinkModifyOperation(
+                        contextResolvedTable,
+                        table.getQueryOperation(),
+                        Collections.emptyMap(),
+                        overwrite,
+                        Collections.emptyMap()));
+
+        return this;
+    }
+
+    @Override
+    public StatementSet addInsert(TableDescriptor targetDescriptor, Table table) {
+        return addInsert(targetDescriptor, table, false);
+    }
+
+    @Override
+    public StatementSet addInsert(
+            TableDescriptor targetDescriptor, Table table, boolean overwrite) {
+        final SchemaTranslator.ConsumingResult schemaTranslationResult =
+                SchemaTranslator.createConsumingResult(
+                        tableEnvironment.getCatalogManager().getDataTypeFactory(),
+                        table.getResolvedSchema().toSourceRowDataType(),
+                        targetDescriptor.getSchema().orElse(null),
+                        false);
+        final TableDescriptor updatedDescriptor =
+                targetDescriptor.toBuilder().schema(schemaTranslationResult.getSchema()).build();
+
+        final ResolvedCatalogTable resolvedCatalogBaseTable =
+                tableEnvironment
+                        .getCatalogManager()
+                        .resolveCatalogTable(updatedDescriptor.toCatalogTable());
+
+        operations.add(
+                new SinkModifyOperation(
+                        ContextResolvedTable.anonymous(resolvedCatalogBaseTable),
                         table.getQueryOperation(),
                         Collections.emptyMap(),
                         overwrite,
@@ -110,8 +149,6 @@ class StatementSetImpl implements StatementSet {
      * be deserialized to an ExecNode plan.
      *
      * <p>The added statements and Tables will NOT be cleared when executing this method.
-     *
-     * <p>NOTES: Only the Blink planner supports this method.
      *
      * <p><b>NOTES</b>: This is an experimental feature now.
      *

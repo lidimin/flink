@@ -61,9 +61,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.table.types.logical.utils.LogicalTypeCasts.supportsAvoidingCast;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests for {@link LogicalTypeCasts#supportsAvoidingCast(LogicalType, LogicalType)}. */
 @RunWith(Parameterized.class)
@@ -230,7 +228,7 @@ public class LogicalTypeCastAvoidanceTest {
                         true
                     },
 
-                    // row and structure type
+                    // row and structured type
                     {
                         RowType.of(new IntType(), new VarCharType()),
                         createUserType("User2", new IntType(), new VarCharType()),
@@ -251,6 +249,46 @@ public class LogicalTypeCastAvoidanceTest {
                         RowType.of(new BigIntType(), new VarCharType()),
                         false
                     },
+
+                    // test slightly different children of anonymous structured types
+                    {
+                        StructuredType.newBuilder(Void.class)
+                                .attributes(
+                                        Arrays.asList(
+                                                new StructuredType.StructuredAttribute(
+                                                        "f1", new TimestampType()),
+                                                new StructuredType.StructuredAttribute(
+                                                        "diff", new TinyIntType(false))))
+                                .build(),
+                        StructuredType.newBuilder(Void.class)
+                                .attributes(
+                                        Arrays.asList(
+                                                new StructuredType.StructuredAttribute(
+                                                        "f1", new TimestampType()),
+                                                new StructuredType.StructuredAttribute(
+                                                        "diff", new TinyIntType(true))))
+                                .build(),
+                        true
+                    },
+                    {
+                        StructuredType.newBuilder(Void.class)
+                                .attributes(
+                                        Arrays.asList(
+                                                new StructuredType.StructuredAttribute(
+                                                        "f1", new TimestampType()),
+                                                new StructuredType.StructuredAttribute(
+                                                        "diff", new TinyIntType(true))))
+                                .build(),
+                        StructuredType.newBuilder(Void.class)
+                                .attributes(
+                                        Arrays.asList(
+                                                new StructuredType.StructuredAttribute(
+                                                        "f1", new TimestampType()),
+                                                new StructuredType.StructuredAttribute(
+                                                        "diff", new TinyIntType(false))))
+                                .build(),
+                        false
+                    }
                 });
     }
 
@@ -264,9 +302,9 @@ public class LogicalTypeCastAvoidanceTest {
 
     @Test
     public void testSupportsAvoidingCast() {
-        assertThat(supportsAvoidingCast(sourceType, targetType), equalTo(equals));
-        assertTrue(supportsAvoidingCast(sourceType, sourceType.copy()));
-        assertTrue(supportsAvoidingCast(targetType, targetType.copy()));
+        assertThat(supportsAvoidingCast(sourceType, targetType)).isEqualTo(equals);
+        assertThat(supportsAvoidingCast(sourceType, sourceType.copy())).isTrue();
+        assertThat(supportsAvoidingCast(targetType, targetType.copy())).isTrue();
     }
 
     private static DistinctType createDistinctType(String name, LogicalType sourceType) {

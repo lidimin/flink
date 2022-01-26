@@ -32,7 +32,7 @@ reusing code that was implemented for Hadoop MapReduce.
 
 You can:
 
-- use Hadoop's `Writable` [data types]({{< ref "docs/dev/serialization/types_serialization" >}}#supported-data-types) in Flink programs.
+- use Hadoop's `Writable` [data types]({{< ref "docs/dev/datastream/fault-tolerance/serialization/types_serialization" >}}#supported-data-types) in Flink programs.
 - use any Hadoop `InputFormat` as a [DataSource](index.html#data-sources).
 - use any Hadoop `OutputFormat` as a [DataSink](index.html#data-sinks).
 - use a Hadoop `Mapper` as [FlatMapFunction](dataset_transformations.html#flatmap).
@@ -74,7 +74,7 @@ a `hadoop-client` dependency such as:
 <dependency>
     <groupId>org.apache.hadoop</groupId>
     <artifactId>hadoop-client</artifactId>
-    <version>2.8.3</version>
+    <version>2.8.5</version>
     <scope>provided</scope>
 </dependency>
 ```

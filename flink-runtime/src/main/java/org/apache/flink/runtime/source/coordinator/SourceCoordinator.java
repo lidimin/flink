@@ -22,6 +22,7 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.connector.source.ReaderInfo;
 import org.apache.flink.api.connector.source.Source;
+import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.connector.source.SourceSplit;
 import org.apache.flink.api.connector.source.SplitEnumerator;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
@@ -111,7 +112,11 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     public void start() throws Exception {
         LOG.info("Starting split enumerator for source {}.", operatorName);
 
-        // there are two ways the coordinator can get created:
+        // we mark this as started first, so that we can later distinguish the cases where
+        // 'start()' wasn't called and where 'start()' failed.
+        started = true;
+
+        // there are two ways the SplitEnumerator can get created:
         //  (1) Source.restoreEnumerator(), in which case the 'resetToCheckpoint()' method creates
         // it
         //  (2) Source.createEnumerator, in which case it has not been created, yet, and we create
@@ -122,13 +127,17 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
             try (TemporaryClassLoaderContext ignored =
                     TemporaryClassLoaderContext.of(userCodeClassLoader)) {
                 enumerator = source.createEnumerator(context);
+            } catch (Throwable t) {
+                ExceptionUtils.rethrowIfFatalErrorOrOOM(t);
+                LOG.error("Failed to create Source Enumerator for source {}", operatorName, t);
+                context.failJob(t);
+                return;
             }
         }
 
         // The start sequence is the first task in the coordinator executor.
         // We rely on the single-threaded coordinator executor to guarantee
         // the other methods are invoked after the enumerator has started.
-        started = true;
         runInEventLoop(() -> enumerator.start(), "starting the SplitEnumerator.");
     }
 
@@ -155,19 +164,31 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     public void handleEventFromOperator(int subtask, OperatorEvent event) {
         runInEventLoop(
                 () -> {
-                    LOG.debug(
-                            "Handling event from subtask {} of source {}: {}",
-                            subtask,
-                            operatorName,
-                            event);
                     if (event instanceof RequestSplitEvent) {
+                        LOG.info(
+                                "Source {} received split request from parallel task {}",
+                                operatorName,
+                                subtask);
                         enumerator.handleSplitRequest(
                                 subtask, ((RequestSplitEvent) event).hostName());
                     } else if (event instanceof SourceEventWrapper) {
-                        enumerator.handleSourceEvent(
-                                subtask, ((SourceEventWrapper) event).getSourceEvent());
+                        final SourceEvent sourceEvent =
+                                ((SourceEventWrapper) event).getSourceEvent();
+                        LOG.debug(
+                                "Source {} received custom event from parallel task {}: {}",
+                                operatorName,
+                                subtask,
+                                sourceEvent);
+                        enumerator.handleSourceEvent(subtask, sourceEvent);
                     } else if (event instanceof ReaderRegistrationEvent) {
-                        handleReaderRegistrationEvent((ReaderRegistrationEvent) event);
+                        final ReaderRegistrationEvent registrationEvent =
+                                (ReaderRegistrationEvent) event;
+                        LOG.info(
+                                "Source {} registering reader for parallel task {} @ {}",
+                                operatorName,
+                                subtask,
+                                registrationEvent.location());
+                        handleReaderRegistrationEvent(registrationEvent);
                     } else {
                         throw new FlinkException("Unrecognized Operator Event: " + event);
                     }
@@ -186,6 +207,7 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                             subtaskId,
                             operatorName);
                     context.unregisterSourceReader(subtaskId);
+                    context.subtaskNotReady(subtaskId);
                 },
                 "handling subtask %d failure",
                 subtaskId);
@@ -215,6 +237,16 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     }
 
     @Override
+    public void subtaskReady(int subtask, SubtaskGateway gateway) {
+        assert subtask == gateway.getSubtask();
+
+        runInEventLoop(
+                () -> context.subtaskReady(gateway),
+                "making event gateway to subtask %d available",
+                subtask);
+    }
+
+    @Override
     public void checkpointCoordinator(long checkpointId, CompletableFuture<byte[]> result) {
         runInEventLoop(
                 () -> {
@@ -224,7 +256,7 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
                             checkpointId);
                     try {
                         context.onCheckpoint(checkpointId);
-                        result.complete(toBytes());
+                        result.complete(toBytes(checkpointId));
                     } catch (Throwable e) {
                         ExceptionUtils.rethrowIfFatalErrorOrOOM(e);
                         result.completeExceptionally(
@@ -298,6 +330,14 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
             final Object... actionNameFormatParameters) {
 
         ensureStarted();
+
+        // we may end up here even for a non-started enumerator, in case the instantiation
+        // failed, and we get the 'subtaskFailed()' notification during the failover.
+        // we need to ignore those.
+        if (enumerator == null) {
+            return;
+        }
+
         coordinatorExecutor.execute(
                 () -> {
                     try {
@@ -341,8 +381,9 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
      * @return A byte array containing the serialized state of the source coordinator.
      * @throws Exception When something goes wrong in serialization.
      */
-    private byte[] toBytes() throws Exception {
-        return writeCheckpointBytes(enumerator.snapshotState(), enumCheckpointSerializer);
+    private byte[] toBytes(long checkpointId) throws Exception {
+        return writeCheckpointBytes(
+                enumerator.snapshotState(checkpointId), enumCheckpointSerializer);
     }
 
     static <EnumChkT> byte[] writeCheckpointBytes(
@@ -367,7 +408,7 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
     /**
      * Restore the state of this source coordinator from the state bytes.
      *
-     * @param bytes The checkpoint bytes that was returned from {@link #toBytes()}
+     * @param bytes The checkpoint bytes that was returned from {@link #toBytes(long)}
      * @throws Exception When the deserialization failed.
      */
     private EnumChkT deserializeCheckpoint(byte[] bytes) throws Exception {
@@ -398,7 +439,5 @@ public class SourceCoordinator<SplitT extends SourceSplit, EnumChkT>
         if (!started) {
             throw new IllegalStateException("The coordinator has not started yet.");
         }
-
-        assert enumerator != null;
     }
 }

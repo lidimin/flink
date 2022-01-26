@@ -20,7 +20,6 @@ package org.apache.flink.connector.jdbc.table;
 
 import org.apache.flink.connector.jdbc.JdbcTestBase;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.planner.runtime.utils.StreamTestSink;
@@ -28,8 +27,9 @@ import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CollectionUtil;
 
-import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.sql.Connection;
@@ -56,13 +56,8 @@ public class JdbcDynamicTableSourceITCase extends AbstractTestBase {
     public static StreamExecutionEnvironment env;
     public static TableEnvironment tEnv;
 
-    @Before
-    public void before() throws ClassNotFoundException, SQLException {
-        env = StreamExecutionEnvironment.getExecutionEnvironment();
-        EnvironmentSettings envSettings =
-                EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
-        tEnv = StreamTableEnvironment.create(env, envSettings);
-
+    @BeforeClass
+    public static void beforeAll() throws ClassNotFoundException, SQLException {
         System.setProperty(
                 "derby.stream.error.field", JdbcTestBase.class.getCanonicalName() + ".DEV_NULL");
         Class.forName(DRIVER_CLASS);
@@ -98,14 +93,20 @@ public class JdbcDynamicTableSourceITCase extends AbstractTestBase {
         }
     }
 
-    @After
-    public void clearOutputTable() throws Exception {
+    @AfterClass
+    public static void afterAll() throws Exception {
         Class.forName(DRIVER_CLASS);
         try (Connection conn = DriverManager.getConnection(DB_URL);
                 Statement stat = conn.createStatement()) {
             stat.executeUpdate("DROP TABLE " + INPUT_TABLE);
         }
         StreamTestSink.clear();
+    }
+
+    @Before
+    public void before() throws Exception {
+        env = StreamExecutionEnvironment.getExecutionEnvironment();
+        tEnv = StreamTableEnvironment.create(env);
     }
 
     @Test

@@ -423,6 +423,66 @@ SqlShowTables SqlShowTables() :
 }
 
 /**
+* SHOW COLUMNS FROM [[catalog.] database.]sqlIdentifier sql call.
+*/
+SqlShowColumns SqlShowColumns() :
+{
+    SqlIdentifier tableName;
+    SqlCharStringLiteral likeLiteral = null;
+    String prep = "FROM";
+    boolean notLike = false;
+    SqlParserPos pos;
+}
+{
+    <SHOW> <COLUMNS> ( <FROM> | <IN> { prep = "IN"; } )
+    { pos = getPos();}
+    tableName = CompoundIdentifier()
+    [
+        [
+            <NOT>
+            {
+                notLike = true;
+            }
+        ]
+        <LIKE>  <QUOTED_STRING>
+        {
+            String likeCondition = SqlParserUtil.parseString(token.image);
+            likeLiteral = SqlLiteral.createCharString(likeCondition, getPos());
+        }
+    ]
+    {
+        return new SqlShowColumns(pos, prep, tableName, notLike, likeLiteral);
+    }
+}
+
+/**
+* Parse a "Show Create Table" query and "Show Create View" query commands.
+*/
+SqlShowCreate SqlShowCreate() :
+{
+    SqlIdentifier sqlIdentifier;
+    SqlParserPos pos;
+}
+{
+    <SHOW> <CREATE>
+    (
+        <TABLE>
+        { pos = getPos(); }
+        sqlIdentifier = CompoundIdentifier()
+        {
+            return new SqlShowCreateTable(pos, sqlIdentifier);
+        }
+    |
+        <VIEW>
+        { pos = getPos(); }
+        sqlIdentifier = CompoundIdentifier()
+        {
+            return new SqlShowCreateView(pos, sqlIdentifier);
+        }
+    )
+}
+
+/**
  * DESCRIBE | DESC [ EXTENDED] [[catalogName.] dataBasesName].tableName sql call.
  * Here we add Rich in className to distinguish from calcite's original SqlDescribeTable.
  */
@@ -447,6 +507,8 @@ SqlAlterTable SqlAlterTable() :
     SqlIdentifier tableIdentifier;
     SqlIdentifier newTableIdentifier = null;
     SqlNodeList propertyList = SqlNodeList.EMPTY;
+    SqlNodeList propertyKeyList = SqlNodeList.EMPTY;
+    SqlNodeList partitionSpec = null;
     SqlIdentifier constraintName;
     SqlTableConstraint constraint;
 }
@@ -461,6 +523,15 @@ SqlAlterTable SqlAlterTable() :
                         startPos.plus(getPos()),
                         tableIdentifier,
                         newTableIdentifier);
+        }
+    |
+        <RESET>
+        propertyKeyList = TablePropertyKeys()
+        {
+            return new SqlAlterTableReset(
+                        startPos.plus(getPos()),
+                        tableIdentifier,
+                        propertyKeyList);
         }
     |
         <SET>
@@ -486,7 +557,43 @@ SqlAlterTable SqlAlterTable() :
                 constraintName,
                 startPos.plus(getPos()));
         }
+    |
+        [
+            <PARTITION>
+            {   partitionSpec = new SqlNodeList(getPos());
+                PartitionSpecCommaList(partitionSpec);
+            }
+        ]
+        <COMPACT>
+        {
+            return new SqlAlterTableCompact(startPos.plus(getPos()), tableIdentifier, partitionSpec);
+        }
     )
+}
+
+/** Parse a table option key list. */
+SqlNodeList TablePropertyKeys():
+{
+    SqlNode key;
+    final List<SqlNode> proKeyList = new ArrayList<SqlNode>();
+    final Span span;
+}
+{
+    <LPAREN> { span = span(); }
+    [
+        key = StringLiteral()
+        {
+            proKeyList.add(key);
+        }
+        (
+            <COMMA> key = StringLiteral()
+            {
+                proKeyList.add(key);
+            }
+        )*
+    ]
+    <RPAREN>
+    {  return new SqlNodeList(proKeyList, span.end(this)); }
 }
 
 void TableColumn(TableCreationContext context) :
@@ -1083,6 +1190,31 @@ SqlDrop SqlDropView(Span s, boolean replace, boolean isTemporary) :
     }
 }
 
+SqlAlterView SqlAlterView() :
+{
+  SqlParserPos startPos;
+  SqlIdentifier viewName;
+  SqlIdentifier newViewName;
+  SqlNode newQuery;
+}
+{
+  <ALTER> <VIEW> { startPos = getPos(); }
+  viewName = CompoundIdentifier()
+  (
+      <RENAME> <TO>
+      newViewName = CompoundIdentifier()
+      {
+        return new SqlAlterViewRename(startPos.plus(getPos()), viewName, newViewName);
+      }
+  |
+      <AS>
+      newQuery = OrderedQueryOrExpr(ExprContext.ACCEPT_QUERY)
+      {
+        return new SqlAlterViewAs(startPos.plus(getPos()), viewName, newQuery);
+      }
+  )
+}
+
 /**
 * A sql type name extended basic data type, it has a counterpart basic
 * sql type name but always represents as a special alias compared with the standard name.
@@ -1578,15 +1710,197 @@ SqlEndStatementSet SqlEndStatementSet() :
 }
 
 /**
+* Parse a statement set.
+* END;
+*/
+SqlNode SqlStatementSet() :
+{
+    SqlParserPos startPos;
+    SqlNode insert;
+    List<RichSqlInsert> inserts = new ArrayList<RichSqlInsert>();
+}
+{
+    <STATEMENT>{ startPos = getPos(); } <SET> <BEGIN>
+    (
+        insert = RichSqlInsert()
+        <SEMICOLON>
+        {
+            inserts.add((RichSqlInsert) insert);
+        }
+    )+
+    <END>
+    {
+        return new SqlStatementSet(inserts, startPos);
+    }
+}
+
+/**
 * Parses a explain module statement.
 */
 SqlNode SqlRichExplain() :
 {
     SqlNode stmt;
+    Set<String> explainDetails = new HashSet<String>();
 }
 {
-    <EXPLAIN> [ <PLAN> <FOR> ]
-    stmt = SqlQueryOrDml() {
-        return new SqlRichExplain(getPos(),stmt);
+    <EXPLAIN> 
+    [
+        <PLAN> <FOR> 
+        |
+            ParseExplainDetail(explainDetails)
+        (
+            <COMMA>
+            ParseExplainDetail(explainDetails)
+        )*
+    ]
+    (
+        stmt = SqlStatementSet()
+        |
+        stmt = OrderedQueryOrExpr(ExprContext.ACCEPT_QUERY)
+        |
+        stmt = RichSqlInsert()
+    )
+    {
+        return new SqlRichExplain(getPos(), stmt, explainDetails);
+    }
+}
+
+/**
+* Parses a execute statement.
+*/
+SqlNode SqlExecute() :
+{
+    SqlParserPos startPos;
+    SqlNode stmt;
+}
+{
+    <EXECUTE>{ startPos = getPos(); }
+    (
+        stmt = SqlStatementSet()
+        |
+        stmt = OrderedQueryOrExpr(ExprContext.ACCEPT_QUERY)
+        |
+        stmt = RichSqlInsert()
+    )
+    {
+        return new SqlExecute(stmt, startPos);
+    }
+}
+
+void ParseExplainDetail(Set<String> explainDetails):
+{
+}
+{
+    (
+        <ESTIMATED_COST> 
+        | 
+        <CHANGELOG_MODE> 
+        | 
+        <JSON_EXECUTION_PLAN>
+    ) 
+    {
+        if (explainDetails.contains(token.image.toUpperCase())) {
+            throw SqlUtil.newContextException(
+                getPos(),
+                ParserResource.RESOURCE.explainDetailIsDuplicate());
+        } else {
+            explainDetails.add(token.image.toUpperCase());
+        }
+    }
+}
+
+/**
+* Parses an ADD JAR statement.
+*/
+SqlAddJar SqlAddJar() :
+{
+    SqlCharStringLiteral jarPath;
+}
+{
+    <ADD> <JAR> <QUOTED_STRING>
+    {
+        String path = SqlParserUtil.parseString(token.image);
+        jarPath = SqlLiteral.createCharString(path, getPos());
+    }
+    {
+        return new SqlAddJar(getPos(), jarPath);
+    }
+}
+
+/**
+* Parses a remove jar statement.
+* REMOVE JAR jar_path;
+*/
+SqlRemoveJar SqlRemoveJar() :
+{
+    SqlCharStringLiteral jarPath;
+}
+{
+    <REMOVE> <JAR> <QUOTED_STRING>
+    {
+        String path = SqlParserUtil.parseString(token.image);
+        jarPath = SqlLiteral.createCharString(path, getPos());
+    }
+    {
+        return new SqlRemoveJar(getPos(), jarPath);
+    }
+}
+
+/**
+* Parses a show jars statement.
+* SHOW JARS;
+*/
+SqlShowJars SqlShowJars() :
+{
+}
+{
+    <SHOW> <JARS>
+    {
+        return new SqlShowJars(getPos());
+    }
+}
+
+/*
+* Parses a SET statement:
+* SET ['key' = 'value'];
+*/
+SqlNode SqlSet() :
+{
+    Span s;
+    SqlNode key = null;
+    SqlNode value = null;
+}
+{
+    <SET> { s = span(); }
+    [
+        key = StringLiteral()
+        <EQ>
+        value = StringLiteral()
+    ]
+    {
+        if (key == null && value == null) {
+            return new SqlSet(s.end(this));
+        } else {
+            return new SqlSet(s.end(this), key, value);
+        }
+    }
+}
+
+/**
+* Parses a RESET statement:
+* RESET ['key'];
+*/
+SqlNode SqlReset() :
+{
+    Span span;
+    SqlNode key = null;
+}
+{
+    <RESET> { span = span(); }
+    [
+        key = StringLiteral()
+    ]
+    {
+        return new SqlReset(span.end(this), key);
     }
 }

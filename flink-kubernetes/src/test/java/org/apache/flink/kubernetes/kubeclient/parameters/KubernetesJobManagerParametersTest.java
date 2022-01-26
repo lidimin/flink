@@ -20,12 +20,15 @@ package org.apache.flink.kubernetes.kubeclient.parameters;
 
 import org.apache.flink.client.deployment.ClusterSpecification;
 import org.apache.flink.configuration.BlobServerOptions;
+import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.kubernetes.KubernetesTestBase;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptionsInternal;
+import org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory;
 import org.apache.flink.kubernetes.utils.Constants;
 import org.apache.flink.util.FlinkRuntimeException;
 
@@ -35,10 +38,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -46,6 +49,8 @@ import static org.junit.Assert.fail;
 public class KubernetesJobManagerParametersTest extends KubernetesTestBase {
 
     private static final double JOB_MANAGER_CPU = 2.0;
+    private static final double JOB_MANAGER_CPU_LIMIT_FACTOR = 2.5;
+    private static final double JOB_MANAGER_MEMORY_LIMIT_FACTOR = 2.0;
 
     private final ClusterSpecification clusterSpecification =
             new ClusterSpecification.ClusterSpecificationBuilder()
@@ -116,6 +121,27 @@ public class KubernetesJobManagerParametersTest extends KubernetesTestBase {
     public void testGetJobManagerCPU() {
         flinkConfig.set(KubernetesConfigOptions.JOB_MANAGER_CPU, JOB_MANAGER_CPU);
         assertEquals(JOB_MANAGER_CPU, kubernetesJobManagerParameters.getJobManagerCPU(), 0.00001);
+    }
+
+    @Test
+    public void testGetJobManagerCPULimitFactor() {
+        flinkConfig.set(
+                KubernetesConfigOptions.JOB_MANAGER_CPU_LIMIT_FACTOR, JOB_MANAGER_CPU_LIMIT_FACTOR);
+        assertEquals(
+                JOB_MANAGER_CPU_LIMIT_FACTOR,
+                kubernetesJobManagerParameters.getJobManagerCPULimitFactor(),
+                0.00001);
+    }
+
+    @Test
+    public void testGetJobManagerMemoryLimitFactor() {
+        flinkConfig.set(
+                KubernetesConfigOptions.JOB_MANAGER_MEMORY_LIMIT_FACTOR,
+                JOB_MANAGER_MEMORY_LIMIT_FACTOR);
+        assertEquals(
+                JOB_MANAGER_MEMORY_LIMIT_FACTOR,
+                kubernetesJobManagerParameters.getJobManagerMemoryLimitFactor(),
+                0.00001);
     }
 
     @Test
@@ -212,5 +238,26 @@ public class KubernetesJobManagerParametersTest extends KubernetesTestBase {
         final Map<String, String> expectedLabels = new HashMap<>(getCommonLabels());
         expectedLabels.put(Constants.LABEL_COMPONENT_KEY, Constants.LABEL_COMPONENT_JOB_MANAGER);
         assertThat(kubernetesJobManagerParameters.getLabels(), is(equalTo(expectedLabels)));
+    }
+
+    @Test(expected = IllegalConfigurationException.class)
+    public void testGetReplicasWithTwoShouldFailWhenHAIsNotEnabled() {
+        flinkConfig.set(KubernetesConfigOptions.KUBERNETES_JOBMANAGER_REPLICAS, 2);
+        kubernetesJobManagerParameters.getReplicas();
+    }
+
+    @Test(expected = IllegalConfigurationException.class)
+    public void testGetReplicasWithInvalidValue() {
+        flinkConfig.set(KubernetesConfigOptions.KUBERNETES_JOBMANAGER_REPLICAS, 0);
+        kubernetesJobManagerParameters.getReplicas();
+    }
+
+    @Test
+    public void testGetReplicas() {
+        flinkConfig.set(
+                HighAvailabilityOptions.HA_MODE,
+                KubernetesHaServicesFactory.class.getCanonicalName());
+        flinkConfig.set(KubernetesConfigOptions.KUBERNETES_JOBMANAGER_REPLICAS, 2);
+        assertThat(kubernetesJobManagerParameters.getReplicas(), is(2));
     }
 }

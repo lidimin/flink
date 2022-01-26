@@ -21,8 +21,8 @@ package org.apache.flink.runtime.dispatcher;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.time.Time;
-import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.testutils.FlinkMatchers;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.blob.BlobKey;
 import org.apache.flink.runtime.blob.BlobServer;
@@ -31,7 +31,7 @@ import org.apache.flink.runtime.blob.PermanentBlobKey;
 import org.apache.flink.runtime.blob.TestingBlobStore;
 import org.apache.flink.runtime.blob.TestingBlobStoreBuilder;
 import org.apache.flink.runtime.client.DuplicateJobSubmissionException;
-import org.apache.flink.runtime.client.JobExecutionException;
+import org.apache.flink.runtime.client.JobSubmissionException;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
@@ -42,7 +42,6 @@ import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
 import org.apache.flink.runtime.jobmanager.JobGraphWriter;
 import org.apache.flink.runtime.jobmaster.JobManagerRunner;
 import org.apache.flink.runtime.jobmaster.JobManagerSharedServices;
-import org.apache.flink.runtime.jobmaster.JobNotFinishedException;
 import org.apache.flink.runtime.jobmaster.TestingJobManagerRunner;
 import org.apache.flink.runtime.jobmaster.factories.JobManagerJobMetricGroupFactory;
 import org.apache.flink.runtime.messages.Acknowledge;
@@ -58,8 +57,8 @@ import org.apache.flink.runtime.util.TestingFatalErrorHandlerResource;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
-import org.apache.flink.util.SerializedThrowable;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.concurrent.FutureUtils;
 
 import org.junit.After;
 import org.junit.AfterClass;
@@ -131,6 +130,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     private CompletableFuture<BlobKey> storedHABlobFuture;
     private CompletableFuture<JobID> deleteAllHABlobsFuture;
     private CompletableFuture<JobID> cleanupJobFuture;
+    private CompletableFuture<JobID> cleanupJobHADataFuture;
     private JobGraphWriter jobGraphWriter = NoOpJobGraphWriter.INSTANCE;
 
     @BeforeClass
@@ -144,13 +144,13 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         jobId = jobGraph.getJobID();
 
         configuration = new Configuration();
-        configuration.setString(
-                BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
 
         highAvailabilityServices = new TestingHighAvailabilityServices();
         clearedJobLatch = new OneShotLatch();
         runningJobsRegistry = new SingleRunningJobsRegistry(jobId, clearedJobLatch);
         highAvailabilityServices.setRunningJobsRegistry(runningJobsRegistry);
+        cleanupJobHADataFuture = new CompletableFuture<>();
+        highAvailabilityServices.setCleanupJobDataFuture(cleanupJobHADataFuture);
 
         storedHABlobFuture = new CompletableFuture<>();
         deleteAllHABlobsFuture = new CompletableFuture<>();
@@ -158,23 +158,18 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         final TestingBlobStore testingBlobStore =
                 new TestingBlobStoreBuilder()
                         .setPutFunction(
-                                putArguments -> storedHABlobFuture.complete(putArguments.f2))
+                                (file, jobId, blobKey) -> storedHABlobFuture.complete(blobKey))
                         .setDeleteAllFunction(deleteAllHABlobsFuture::complete)
                         .createTestingBlobStore();
 
         cleanupJobFuture = new CompletableFuture<>();
 
-        blobServer = new TestingBlobServer(configuration, testingBlobStore, cleanupJobFuture);
-
-        // upload a blob to the blob server
-        permanentBlobKey = blobServer.putPermanent(jobId, new byte[256]);
-        jobGraph.addUserJarBlobKey(permanentBlobKey);
-        blobFile = blobServer.getStorageLocation(jobId, permanentBlobKey);
-
-        assertThat(blobFile.exists(), is(true));
-
-        // verify that we stored the blob also in the BlobStore
-        assertThat(storedHABlobFuture.get(), equalTo(permanentBlobKey));
+        blobServer =
+                new TestingBlobServer(
+                        configuration,
+                        temporaryFolder.newFolder(),
+                        testingBlobStore,
+                        cleanupJobFuture);
     }
 
     private TestingJobManagerRunnerFactory startDispatcherAndSubmitJob() throws Exception {
@@ -186,7 +181,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         final TestingJobManagerRunnerFactory testingJobManagerRunnerFactoryNG =
                 new TestingJobManagerRunnerFactory(numBlockingJobManagerRunners);
         startDispatcher(testingJobManagerRunnerFactoryNG);
-        submitJob();
+        submitJobAndWait();
 
         return testingJobManagerRunnerFactoryNG;
     }
@@ -213,6 +208,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                                 testingFatalErrorHandlerResource.getFatalErrorHandler(),
                                 VoidHistoryServerArchivist.INSTANCE,
                                 null,
+                                new DispatcherOperationCaches(),
                                 UnregisteredMetricGroups.createUnregisteredJobManagerMetricGroup(),
                                 jobGraphWriter,
                                 jobManagerRunnerFactory,
@@ -258,10 +254,25 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         assertThat(blobFile.exists(), is(false));
     }
 
-    private void submitJob() throws InterruptedException, ExecutionException {
-        final CompletableFuture<Acknowledge> submissionFuture =
-                dispatcherGateway.submitJob(jobGraph, timeout);
-        submissionFuture.get();
+    private CompletableFuture<Acknowledge> submitJob() {
+        try {
+            // upload a blob to the blob server
+            permanentBlobKey = blobServer.putPermanent(jobId, new byte[256]);
+            jobGraph.addUserJarBlobKey(permanentBlobKey);
+            blobFile = blobServer.getStorageLocation(jobId, permanentBlobKey);
+
+            assertThat(blobFile.exists(), is(true));
+
+            // verify that we stored the blob also in the BlobStore
+            assertThat(storedHABlobFuture.join(), equalTo(permanentBlobKey));
+            return dispatcherGateway.submitJob(jobGraph, timeout);
+        } catch (IOException ioe) {
+            return FutureUtils.completedExceptionally(ioe);
+        }
+    }
+
+    private void submitJobAndWait() {
+        submitJob().join();
     }
 
     @Test
@@ -272,8 +283,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         // job not finished
         final TestingJobManagerRunner testingJobManagerRunner =
                 jobManagerRunnerFactory.takeCreatedJobManagerRunner();
-        testingJobManagerRunner.completeResultFutureExceptionally(
-                new JobNotFinishedException(jobId));
+        suspendJob(testingJobManagerRunner);
 
         assertThat(cleanupJobFuture.get(), equalTo(jobId));
 
@@ -294,17 +304,15 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testBlobServerCleanupWhenJobSubmissionFails() throws Exception {
         startDispatcher(new FailingJobManagerRunnerFactory(new FlinkException("Test exception")));
-        dispatcherGateway.submitJob(jobGraph, timeout).get();
+        final CompletableFuture<Acknowledge> submissionFuture = submitJob();
 
-        Optional<SerializedThrowable> maybeError =
-                dispatcherGateway.requestJobResult(jobId, timeout).get().getSerializedThrowable();
+        try {
+            submissionFuture.get();
+            fail("Job submission was expected to fail.");
+        } catch (ExecutionException ee) {
+            assertThat(ee, FlinkMatchers.containsCause(JobSubmissionException.class));
+        }
 
-        assertThat(maybeError.isPresent(), is(true));
-        Throwable exception = maybeError.get().deserializeError(this.getClass().getClassLoader());
-
-        assertThat(
-                ExceptionUtils.findThrowable(exception, JobExecutionException.class).isPresent(),
-                is(true));
         assertThatHABlobsHaveBeenRemoved();
     }
 
@@ -332,7 +340,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
     @Test
     public void testHACleanupWhenJobFinishedWhileClosingDispatcher() throws Exception {
         final TestingJobManagerRunner testingJobManagerRunner =
-                new TestingJobManagerRunner.Builder()
+                TestingJobManagerRunner.newBuilder()
                         .setBlockingTermination(true)
                         .setJobId(jobId)
                         .build();
@@ -341,7 +349,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
                 new ArrayDeque<>(Arrays.asList(testingJobManagerRunner));
 
         startDispatcher(new QueueJobManagerRunnerFactory(jobManagerRunners));
-        submitJob();
+        submitJobAndWait();
 
         final CompletableFuture<Void> dispatcherTerminationFuture = dispatcher.closeAsync();
 
@@ -401,8 +409,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         runningJobsRegistry.setJobRunning(jobId);
         final TestingJobManagerRunner testingJobManagerRunner =
                 jobManagerRunnerFactory.takeCreatedJobManagerRunner();
-        testingJobManagerRunner.completeResultFutureExceptionally(
-                new JobNotFinishedException(jobId));
+        suspendJob(testingJobManagerRunner);
 
         // wait until termination JobManagerRunner closeAsync has been called.
         // this is necessary to avoid race conditions with completion of the 1st job and the
@@ -457,12 +464,46 @@ public class DispatcherResourceCleanupTest extends TestLogger {
         assertThatHABlobsHaveBeenRemoved();
     }
 
+    @Test
+    public void testHaDataCleanupWhenJobFinished() throws Exception {
+        TestingJobManagerRunnerFactory jobManagerRunnerFactory = startDispatcherAndSubmitJob();
+        TestingJobManagerRunner jobManagerRunner =
+                jobManagerRunnerFactory.takeCreatedJobManagerRunner();
+        finishJob(jobManagerRunner);
+        JobID jobID = cleanupJobHADataFuture.get(2000, TimeUnit.MILLISECONDS);
+        assertThat(jobID, is(this.jobId));
+    }
+
+    @Test
+    public void testHaDataCleanupWhenJobNotFinished() throws Exception {
+        TestingJobManagerRunnerFactory jobManagerRunnerFactory = startDispatcherAndSubmitJob();
+        TestingJobManagerRunner jobManagerRunner =
+                jobManagerRunnerFactory.takeCreatedJobManagerRunner();
+        suspendJob(jobManagerRunner);
+        try {
+            cleanupJobHADataFuture.get(10L, TimeUnit.MILLISECONDS);
+            fail("We should not delete the HA data for job.");
+        } catch (TimeoutException ignored) {
+            // expected
+        }
+        assertThat(cleanupJobHADataFuture.isDone(), is(false));
+    }
+
     private void finishJob(TestingJobManagerRunner takeCreatedJobManagerRunner) {
+        terminateJobWithState(takeCreatedJobManagerRunner, JobStatus.FINISHED);
+    }
+
+    private void suspendJob(TestingJobManagerRunner takeCreatedJobManagerRunner) {
+        terminateJobWithState(takeCreatedJobManagerRunner, JobStatus.SUSPENDED);
+    }
+
+    private void terminateJobWithState(
+            TestingJobManagerRunner takeCreatedJobManagerRunner, JobStatus state) {
         takeCreatedJobManagerRunner.completeResultFuture(
                 new ExecutionGraphInfo(
                         new ArchivedExecutionGraphBuilder()
                                 .setJobID(jobId)
-                                .setState(JobStatus.FINISHED)
+                                .setState(state)
                                 .build()));
     }
 
@@ -619,10 +660,11 @@ public class DispatcherResourceCleanupTest extends TestLogger {
          */
         public TestingBlobServer(
                 Configuration config,
+                File storageDirectory,
                 BlobStore blobStore,
                 CompletableFuture<JobID> cleanupJobFuture)
                 throws IOException {
-            super(config, blobStore);
+            super(config, storageDirectory, blobStore);
             this.cleanupJobFuture = cleanupJobFuture;
         }
 

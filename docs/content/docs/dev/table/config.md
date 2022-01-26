@@ -31,9 +31,7 @@ performance.
 
 Depending on the requirements of a table program, it might be necessary to adjust
 certain parameters for optimization. For example, unbounded streaming programs may need to ensure
-that the required state size is capped (see [streaming concepts](./streaming/query_configuration.html)).
-
-
+that the required state size is capped (see [streaming concepts]({{< ref "docs/dev/table/concepts/overview" >}})).
 
 ### Overview
 
@@ -82,11 +80,18 @@ configuration.setString("table.exec.mini-batch.size", "5000")
 t_env = ...
 
 # access flink configuration
-configuration = t_env.get_config().get_configuration();
+configuration = t_env.get_config().get_configuration()
 # set low-level key-value options
-configuration.set_string("table.exec.mini-batch.enabled", "true");
-configuration.set_string("table.exec.mini-batch.allow-latency", "5 s");
-configuration.set_string("table.exec.mini-batch.size", "5000");
+configuration.set_string("table.exec.mini-batch.enabled", "true")
+configuration.set_string("table.exec.mini-batch.allow-latency", "5 s")
+configuration.set_string("table.exec.mini-batch.size", "5000")
+```
+{{< /tab >}}
+{{< tab "SQL CLI" >}}
+```
+Flink SQL> SET 'table.exec.mini-batch.enabled' = 'true';
+Flink SQL> SET 'table.exec.mini-batch.allow-latency' = '5s';
+Flink SQL> SET 'table.exec.mini-batch.size' = '5000';
 ```
 {{< /tab >}}
 {{< /tabs >}}

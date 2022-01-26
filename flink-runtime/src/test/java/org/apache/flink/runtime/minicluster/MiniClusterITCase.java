@@ -611,7 +611,7 @@ public class MiniClusterITCase extends TestLogger {
         try (final MiniCluster miniCluster = new MiniCluster(cfg)) {
             miniCluster.start();
 
-            final JobVertex failingJobVertex = new OutOfMemoryJobVertex();
+            final JobVertex failingJobVertex = new OutOfMemoryInFinalizationJobVertex();
             failingJobVertex.setInvokableClass(NoOpInvokable.class);
             failingJobVertex.setParallelism(parallelism);
 
@@ -653,14 +653,7 @@ public class MiniClusterITCase extends TestLogger {
         try (final MiniCluster miniCluster = new MiniCluster(cfg)) {
             miniCluster.start();
 
-            final JobVertex failingJobVertex =
-                    new JobVertex("FailingInFinalization") {
-
-                        @Override
-                        public void initializeOnMaster(ClassLoader loader) {
-                            throw new OutOfMemoryError("Java heap space");
-                        }
-                    };
+            final JobVertex failingJobVertex = new OutOfMemoryInInitializationVertex();
             failingJobVertex.setInvokableClass(NoOpInvokable.class);
             failingJobVertex.setParallelism(parallelism);
 
@@ -677,12 +670,10 @@ public class MiniClusterITCase extends TestLogger {
             try {
                 jobResultFuture.get();
             } catch (ExecutionException e) {
-                assertTrue(findThrowable(e, OutOfMemoryError.class).isPresent());
+                assertThat(e, FlinkMatchers.containsCause(OutOfMemoryError.class));
                 assertThat(
-                        findThrowable(e, OutOfMemoryError.class)
-                                .map(OutOfMemoryError::getMessage)
-                                .get(),
-                        startsWith(
+                        e,
+                        FlinkMatchers.containsMessage(
                                 "Java heap space. A heap space-related out-of-memory error has occurred."));
             }
         }
@@ -740,14 +731,26 @@ public class MiniClusterITCase extends TestLogger {
         }
     }
 
-    private static class OutOfMemoryJobVertex extends JobVertex {
+    private static class OutOfMemoryInFinalizationJobVertex extends JobVertex {
 
-        private OutOfMemoryJobVertex() {
+        private OutOfMemoryInFinalizationJobVertex() {
             super("FailingInFinalization");
         }
 
         @Override
         public void finalizeOnMaster(ClassLoader loader) {
+            throw new OutOfMemoryError("Java heap space");
+        }
+    }
+
+    private static class OutOfMemoryInInitializationVertex extends JobVertex {
+
+        OutOfMemoryInInitializationVertex() {
+            super("FailingInInitialization");
+        }
+
+        @Override
+        public void initializeOnMaster(ClassLoader loader) {
             throw new OutOfMemoryError("Java heap space");
         }
     }

@@ -3,7 +3,7 @@ title: FileSystem
 weight: 8
 type: docs
 aliases:
-  - /zh/dev/table/connectors/filesystem.html
+- /dev/table/connectors/filesystem.html
 ---
 <!--
 Licensed to the Apache Software Foundation (ASF) under one
@@ -30,6 +30,7 @@ This connector provides access to partitioned files in filesystems
 supported by the [Flink FileSystem abstraction]({{< ref "docs/deployment/filesystems/overview" >}}).
 
 The file system connector itself is included in Flink and does not require an additional dependency.
+The corresponding jar can be found in the Flink distribution inside the `/lib` directory.
 A corresponding format needs to be specified for reading and writing rows from and to a file system.
 
 The file system connector allows for reading and writing from a local or distributed filesystem. A filesystem table can be defined as:
@@ -93,19 +94,106 @@ The file system table supports both partition inserting and overwrite inserting.
 
 The file system connector supports multiple formats:
 
- - CSV: [RFC-4180](https://tools.ietf.org/html/rfc4180). Uncompressed.
- - JSON: Note JSON format for file system connector is not a typical JSON file but uncompressed [newline delimited JSON](http://jsonlines.org/).
- - Avro: [Apache Avro](http://avro.apache.org). Support compression by configuring `avro.codec`.
- - Parquet: [Apache Parquet](http://parquet.apache.org). Compatible with Hive.
- - Orc: [Apache Orc](http://orc.apache.org). Compatible with Hive.
- - Debezium-JSON: [debezium-json]({{< ref "docs/connectors/table/formats/debezium" >}}).
- - Canal-JSON: [canal-json]({{< ref "docs/connectors/table/formats/canal" >}}).
- - Raw: [raw]({{< ref "docs/connectors/table/formats/raw" >}}).
+- CSV: [RFC-4180](https://tools.ietf.org/html/rfc4180). Uncompressed.
+- JSON: Note JSON format for file system connector is not a typical JSON file but uncompressed [newline delimited JSON](http://jsonlines.org/).
+- Avro: [Apache Avro](http://avro.apache.org). Support compression by configuring `avro.codec`.
+- Parquet: [Apache Parquet](http://parquet.apache.org). Compatible with Hive.
+- Orc: [Apache Orc](http://orc.apache.org). Compatible with Hive.
+- Debezium-JSON: [debezium-json]({{< ref "docs/connectors/table/formats/debezium" >}}).
+- Canal-JSON: [canal-json]({{< ref "docs/connectors/table/formats/canal" >}}).
+- Raw: [raw]({{< ref "docs/connectors/table/formats/raw" >}}).
+
+## Source
+
+The file system connector can be used to read single files or entire directories into a single table.
+
+When using a directory as the source path, there is **no defined order of ingestion** for the files inside the directory.
+
+### Directory watching
+
+The file system connector automatically watches the input directory when the runtime mode is configured as STREAMING.
+
+You can modify the watch interval using the following option.
+
+<table class="table table-bordered">
+  <thead>
+    <tr>
+        <th class="text-left" style="width: 20%">Key</th>
+        <th class="text-left" style="width: 15%">Default</th>
+        <th class="text-left" style="width: 10%">Type</th>
+        <th class="text-left" style="width: 55%">Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+        <td><h5>source.monitor-interval</h5></td>
+        <td style="word-wrap: break-word;">(none)</td>
+        <td>Duration</td>
+        <td>The interval in which the source checks for new files. The interval must be greater than 0. 
+        Each file is uniquely identified by its path, and will be processed once, as soon as it's discovered. 
+        The set of files already processed is kept in state during the whole lifecycle of the source, 
+        so it's persisted in checkpoints and savepoints together with the source state. 
+        Shorter intervals mean that files are discovered more quickly, 
+        but also imply more frequent listing or directory traversal of the file system / object store. 
+        If this config option is not set, the provided path will be scanned once, hence the source will be bounded.</td>
+    </tr>
+  </tbody>
+</table>
+
+### Available Metadata
+
+The following connector metadata can be accessed as metadata columns in a table definition. All the metadata are read only.
+
+<table class="table table-bordered">
+    <thead>
+    <tr>
+      <th class="text-left" style="width: 25%">Key</th>
+      <th class="text-center" style="width: 30%">Data Type</th>
+      <th class="text-center" style="width: 40%">Description</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr>
+      <td><code>file.path</code></td>
+      <td><code>STRING NOT NULL</code></td>
+      <td>Full path of the input file.</td>
+    </tr>
+    <tr>
+      <td><code>file.name</code></td>
+      <td><code>STRING NOT NULL</code></td>
+      <td>Name of the file, that is the farthest element from the root of the filepath.</td>
+    </tr>
+    <tr>
+      <td><code>file.size</code></td>
+      <td><code>BIGINT NOT NULL</code></td>
+      <td>Byte count of the file.</td>
+    </tr>
+    <tr>
+      <td><code>file.modification-time</code></td>
+      <td><code>TIMESTAMP_LTZ(3) NOT NULL</code></td>
+      <td>Modification time of the file.</td>
+    </tr>
+    </tbody>
+</table>
+
+The extended `CREATE TABLE` example demonstrates the syntax for exposing these metadata fields:
+
+```sql
+CREATE TABLE MyUserTableWithFilepath (
+  column_name1 INT,
+  column_name2 STRING,
+  `file.path` STRING NOT NULL METADATA
+) WITH (
+  'connector' = 'filesystem',
+  'path' = 'file:///path/to/whatever',
+  'format' = 'json'
+)
+```
 
 ## Streaming Sink
 
-The file system connector supports streaming writes, based on Flink's [Streaming File Sink]({{< ref "docs/connectors/datastream/streamfile_sink" >}})
-to write records to file. Row-encoded Formats are csv and json. Bulk-encoded Formats are parquet, orc and avro.
+The file system connector supports streaming writes, based on Flink's [FileSystem]({{< ref "docs/connectors/datastream/filesystem" >}}),
+to write records to file. Row-encoded Formats are CSV and JSON. Bulk-encoded Formats are Parquet, ORC and Avro.
 
 You can write SQL directly, insert the stream data into the non-partitioned table.
 If it is a partitioned table, you can configure partition related operations. See [Partition Commit](filesystem.html#partition-commit) for details.
@@ -225,31 +313,37 @@ To define when to commit a partition, providing partition commit trigger:
         <td>Duration</td>
         <td>The partition will not commit until the delay time. If it is a daily partition, should be '1 d', if it is a hourly partition, should be '1 h'.</td>
     </tr>
+    <tr>
+        <td><h5>sink.partition-commit.watermark-time-zone</h5></td>
+        <td style="word-wrap: break-word;">UTC</td>
+        <td>String</td>
+        <td>The time zone to parse the long watermark value to TIMESTAMP value, the parsed watermark timestamp is used to compare with partition time to decide the partition should commit or not. This option is only take effect when `sink.partition-commit.trigger` is set to 'partition-time'. If this option is not configured correctly, e.g. source rowtime is defined on TIMESTAMP_LTZ column, but this config is not configured, then users may see the partition committed after a few hours. The default value is 'UTC', which means the watermark is defined on TIMESTAMP column or not defined. If the watermark is defined on TIMESTAMP_LTZ column, the time zone of watermark is the session time zone. The option value is either a full name such as 'America/Los_Angeles', or a custom timezone id such as 'GMT-08:00'.</td>
+    </tr>    
   </tbody>
 </table>
 
 There are two types of trigger:
 - The first is partition processing time. It neither requires partition time extraction nor watermark
-generation. The trigger of partition commit according to partition creation time and current system time. This trigger
-is more universal, but not so precise. For example, data delay or failover will lead to premature partition commit.
+  generation. The trigger of partition commit according to partition creation time and current system time. This trigger
+  is more universal, but not so precise. For example, data delay or failover will lead to premature partition commit.
 - The second is the trigger of partition commit according to the time that extracted from partition values and watermark.
-This requires that your job has watermark generation, and the partition is divided according to time, such as
-hourly partition or daily partition.
+  This requires that your job has watermark generation, and the partition is divided according to time, such as
+  hourly partition or daily partition.
 
 If you want to let downstream see the partition as soon as possible, no matter whether its data is complete or not:
 - 'sink.partition-commit.trigger'='process-time' (Default value)
 - 'sink.partition-commit.delay'='0s' (Default value)
-Once there is data in the partition, it will immediately commit. Note: the partition may be committed multiple times.
+  Once there is data in the partition, it will immediately commit. Note: the partition may be committed multiple times.
 
 If you want to let downstream see the partition only when its data is complete, and your job has watermark generation, and you can extract the time from partition values:
 - 'sink.partition-commit.trigger'='partition-time'
 - 'sink.partition-commit.delay'='1h' ('1h' if your partition is hourly partition, depends on your partition type)
-This is the most accurate way to commit partition, and it will try to ensure that the committed partitions are as data complete as possible.
+  This is the most accurate way to commit partition, and it will try to ensure that the committed partitions are as data complete as possible.
 
 If you want to let downstream see the partition only when its data is complete, but there is no watermark, or the time cannot be extracted from partition values:
 - 'sink.partition-commit.trigger'='process-time' (Default value)
 - 'sink.partition-commit.delay'='1h' ('1h' if your partition is hourly partition, depends on your partition type)
-Try to commit partition accurately, but data delay or failover will lead to premature partition commit.
+  Try to commit partition accurately, but data delay or failover will lead to premature partition commit.
 
 Late data processing: The record will be written into its partition when a record is supposed to be
 written into a partition that has already been committed, and then the committing of this partition
@@ -273,7 +367,7 @@ Time extractors define extracting time from partition values.
         <td><h5>partition.time-extractor.kind</h5></td>
         <td style="word-wrap: break-word;">default</td>
         <td>String</td>
-        <td>Time extractor to extract time from partition values. Support default and custom. For default, can configure timestamp pattern. For custom, should configure extractor class.</td>
+        <td>Time extractor to extract time from partition values. Support default and custom. For default, can configure timestamp pattern\formatter. For custom, should configure extractor class.</td>
     </tr>
     <tr>
         <td><h5>partition.time-extractor.class</h5></td>
@@ -285,7 +379,15 @@ Time extractors define extracting time from partition values.
         <td><h5>partition.time-extractor.timestamp-pattern</h5></td>
         <td style="word-wrap: break-word;">(none)</td>
         <td>String</td>
-        <td>The 'default' construction way allows users to use partition fields to get a legal timestamp pattern. Default support 'yyyy-mm-dd hh:mm:ss' from first field. If timestamp should be extracted from a single partition field 'dt', can configure: '$dt'. If timestamp should be extracted from multiple partition fields, say 'year', 'month', 'day' and 'hour', can configure: '$year-$month-$day $hour:00:00'. If timestamp should be extracted from two partition fields 'dt' and 'hour', can configure: '$dt $hour:00:00'.</td>
+        <td>The 'default' construction way allows users to use partition fields to get a legal timestamp pattern. Default support 'yyyy-MM-dd hh:mm:ss' from first field. If timestamp should be extracted from a single partition field 'dt', can configure: '$dt'. If timestamp should be extracted from multiple partition fields, say 'year', 'month', 'day' and 'hour', can configure: '$year-$month-$day $hour:00:00'. If timestamp should be extracted from two partition fields 'dt' and 'hour', can configure: '$dt $hour:00:00'.</td>
+    </tr>
+    <tr>
+        <td><h5>partition.time-extractor.timestamp-formatter</h5></td>
+        <td style="word-wrap: break-word;">yyyy-MM-dd&nbsp;HH:mm:ss</td>
+        <td>String</td>
+        <td>The formatter that formats the partition timestamp string value to timestamp, the partition timestamp string value is expressed by 'partition.time-extractor.timestamp-pattern'. For example, the partition timestamp is extracted from multiple partition fields, say 'year', 'month' and 'day', you can configure 'partition.time-extractor.timestamp-pattern' to '$year$month$day', and configure `partition.time-extractor.timestamp-formatter` to 'yyyyMMdd'. By default the formatter is 'yyyy-MM-dd HH:mm:ss'.
+            <br>The timestamp-formatter is compatible with Java's <a href="https://docs.oracle.com/javase/8/docs/api/java/time/format/DateTimeFormatter.html">DateTimeFormatter</a>
+ 				</td>
     </tr>
   </tbody>
 </table>
@@ -310,7 +412,7 @@ public class HourPartTimeExtractor implements PartitionTimeExtractor {
 The partition commit policy defines what action is taken when partitions are committed.
 
 - The first is metastore, only hive table supports metastore policy, file system manages partitions through directory structure.
-- The second is the success file, which will write an empty file in the directory corresponding to the partition. 
+- The second is the success file, which will write an empty file in the directory corresponding to the partition.
 
 <table class="table table-bordered">
   <thead>
@@ -393,7 +495,7 @@ The parallelism of writing files into external file system (including Hive) can 
         <td>Integer</td>
         <td>Parallelism of writing files into external file system. The value should greater than zero otherwise exception will be thrown.</td>
     </tr>
-    
+
   </tbody>
 </table>
 
@@ -401,7 +503,7 @@ The parallelism of writing files into external file system (including Hive) can 
 
 ## Full Example
 
-The below shows how the file system connector can be used to write a streaming query to write data from Kafka into a file system and runs a batch query to read that data back out.
+The below examples show how the file system connector can be used to write a streaming query to write data from Kafka into a file system and runs a batch query to read that data back out.
 
 ```sql
 
@@ -432,6 +534,46 @@ SELECT
     order_amount, 
     DATE_FORMAT(log_ts, 'yyyy-MM-dd'),
     DATE_FORMAT(log_ts, 'HH') 
+FROM kafka_table;
+
+-- batch sql, select with partition pruning
+SELECT * FROM fs_table WHERE dt='2020-05-20' and `hour`='12';
+```
+
+If the watermark is defined on TIMESTAMP_LTZ column and used `partition-time` to commit, the `sink.partition-commit.watermark-time-zone` is required to set to the session time zone, otherwise the partition committed may happen after a few hours.
+```sql
+
+CREATE TABLE kafka_table (
+  user_id STRING,
+  order_amount DOUBLE,
+  ts BIGINT, -- time in epoch milliseconds
+  ts_ltz AS TO_TIMESTAMP_LTZ(ts, 3),
+  WATERMARK FOR ts_ltz AS ts_ltz - INTERVAL '5' SECOND -- Define watermark on TIMESTAMP_LTZ column
+) WITH (...);
+
+CREATE TABLE fs_table (
+  user_id STRING,
+  order_amount DOUBLE,
+  dt STRING,
+  `hour` STRING
+) PARTITIONED BY (dt, `hour`) WITH (
+  'connector'='filesystem',
+  'path'='...',
+  'format'='parquet',
+  'partition.time-extractor.timestamp-pattern'='$dt $hour:00:00',
+  'sink.partition-commit.delay'='1 h',
+  'sink.partition-commit.trigger'='partition-time',
+  'sink.partition-commit.watermark-time-zone'='Asia/Shanghai', -- Assume user configured time zone is 'Asia/Shanghai'
+  'sink.partition-commit.policy.kind'='success-file'
+);
+
+-- streaming sql, insert into file system table
+INSERT INTO fs_table 
+SELECT 
+    user_id, 
+    order_amount, 
+    DATE_FORMAT(ts_ltz, 'yyyy-MM-dd'),
+    DATE_FORMAT(ts_ltz, 'HH') 
 FROM kafka_table;
 
 -- batch sql, select with partition pruning

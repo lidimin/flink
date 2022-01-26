@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.jobmaster;
 
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.time.Deadline;
@@ -35,9 +36,10 @@ import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobGraphBuilder;
 import org.apache.flink.runtime.jobgraph.JobVertex;
-import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
+import org.apache.flink.runtime.jobgraph.tasks.TaskInvokable;
+import org.apache.flink.runtime.testutils.CommonTestUtils;
 import org.apache.flink.streaming.runtime.tasks.StreamTask;
 import org.apache.flink.streaming.runtime.tasks.StreamTaskTest.NoOpStreamTask;
 import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
@@ -45,7 +47,6 @@ import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.util.ExceptionUtils;
 
 import org.junit.Assume;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -53,10 +54,8 @@ import org.junit.rules.TemporaryFolder;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Collections;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -64,13 +63,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.either;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasItem;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -78,7 +74,6 @@ import static org.junit.Assert.fail;
  * ITCases testing the stop with savepoint functionality. This includes checking both SUSPEND and
  * TERMINATE.
  */
-@Ignore("FLINK-22249, FLINK-22248")
 public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
 
     @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -99,43 +94,12 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
 
     private JobGraph jobGraph;
 
-    @Test(timeout = 5000)
-    public void suspendWithSavepointWithoutComplicationsShouldSucceedAndLeadJobToFinished()
-            throws Exception {
-        stopWithSavepointNormalExecutionHelper(false);
-    }
-
-    @Test(timeout = 5000)
-    public void terminateWithSavepointWithoutComplicationsShouldSucceedAndLeadJobToFinished()
-            throws Exception {
-        stopWithSavepointNormalExecutionHelper(true);
-    }
-
-    private void stopWithSavepointNormalExecutionHelper(final boolean terminate) throws Exception {
-        setUpJobGraph(NoOpBlockingStreamTask.class, RestartStrategies.noRestart());
-
-        final CompletableFuture<String> savepointLocationFuture = stopWithSavepoint(terminate);
-
-        assertThat(getJobStatus(), equalTo(JobStatus.RUNNING));
-
-        finishingLatch.trigger();
-
-        final String savepointLocation = savepointLocationFuture.get();
-        assertThat(getJobStatus(), equalTo(JobStatus.FINISHED));
-
-        final List<Path> savepoints;
-        try (Stream<Path> savepointFiles = Files.list(savepointDirectory)) {
-            savepoints = savepointFiles.map(Path::getFileName).collect(Collectors.toList());
-        }
-        assertThat(savepoints, hasItem(Paths.get(savepointLocation).getFileName()));
-    }
-
-    @Test(timeout = 5000)
+    @Test
     public void throwingExceptionOnCallbackWithNoRestartsShouldFailTheSuspend() throws Exception {
         throwingExceptionOnCallbackWithoutRestartsHelper(false);
     }
 
-    @Test(timeout = 5000)
+    @Test
     public void throwingExceptionOnCallbackWithNoRestartsShouldFailTheTerminate() throws Exception {
         throwingExceptionOnCallbackWithoutRestartsHelper(true);
     }
@@ -154,16 +118,17 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
 
         // verifying that we actually received a synchronous checkpoint
         assertTrue(syncSavepointId.get() > 0);
-        assertThat(getJobStatus(), equalTo(JobStatus.FAILED));
+        assertThat(
+                getJobStatus(), either(equalTo(JobStatus.FAILED)).or(equalTo(JobStatus.FAILING)));
     }
 
-    @Test(timeout = 5000)
+    @Test
     public void throwingExceptionOnCallbackWithRestartsShouldSimplyRestartInSuspend()
             throws Exception {
         throwingExceptionOnCallbackWithRestartsHelper(false);
     }
 
-    @Test(timeout = 5000)
+    @Test
     public void throwingExceptionOnCallbackWithRestartsShouldSimplyRestartInTerminate()
             throws Exception {
         throwingExceptionOnCallbackWithRestartsHelper(true);
@@ -209,7 +174,7 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
                 either(equalTo(JobStatus.CANCELLING)).or(equalTo(JobStatus.CANCELED)));
     }
 
-    @Test(timeout = 5000)
+    @Test
     public void testRestartCheckpointCoordinatorIfStopWithSavepointFails() throws Exception {
         setUpJobGraph(CheckpointCountingTask.class, RestartStrategies.noRestart());
 
@@ -231,8 +196,7 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
             String exceptionMessage = checkpointExceptionOptional.get().getMessage();
             assertTrue(
                     "Stop with savepoint failed because of another cause " + exceptionMessage,
-                    exceptionMessage.contains(
-                            CheckpointFailureReason.TRIGGER_CHECKPOINT_FAILURE.message()));
+                    exceptionMessage.contains(CheckpointFailureReason.IO_EXCEPTION.message()));
         }
 
         final JobStatus jobStatus =
@@ -257,7 +221,7 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
     }
 
     private void setUpJobGraph(
-            final Class<? extends AbstractInvokable> invokable,
+            final Class<? extends TaskInvokable> invokable,
             final RestartStrategies.RestartStrategyConfiguration restartStrategy)
             throws Exception {
 
@@ -295,7 +259,7 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
                                 CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
                                 true,
                                 false,
-                                false,
+                                0,
                                 0),
                         null);
 
@@ -312,20 +276,16 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
     }
 
     private void waitForJob() throws Exception {
-        for (int i = 0; i < 60; i++) {
-            try {
-                final JobStatus jobStatus =
-                        clusterClient.getJobStatus(jobGraph.getJobID()).get(60, TimeUnit.SECONDS);
-                assertThat(jobStatus.isGloballyTerminalState(), equalTo(false));
-                if (jobStatus == JobStatus.RUNNING) {
-                    return;
-                }
-            } catch (ExecutionException ignored) {
-                // JobManagerRunner is not yet registered in Dispatcher
-            }
-            Thread.sleep(1000);
-        }
-        throw new AssertionError("Job did not become running within timeout.");
+        Deadline deadline = Deadline.fromNow(Duration.ofMinutes(5));
+        JobID jobID = jobGraph.getJobID();
+        CommonTestUtils.waitForAllTaskRunning(
+                () ->
+                        miniClusterResource
+                                .getMiniCluster()
+                                .getExecutionGraph(jobID)
+                                .get(60, TimeUnit.SECONDS),
+                deadline,
+                false);
     }
 
     /**
@@ -350,7 +310,7 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
         }
 
         @Override
-        public Future<Boolean> triggerCheckpointAsync(
+        public CompletableFuture<Boolean> triggerCheckpointAsync(
                 CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions) {
             final long checkpointId = checkpointMetaData.getCheckpointId();
             final CheckpointType checkpointType = checkpointOptions.getCheckpointType();
@@ -374,7 +334,8 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
         }
 
         @Override
-        public Future<Void> notifyCheckpointAbortAsync(long checkpointId) {
+        public Future<Void> notifyCheckpointAbortAsync(
+                long checkpointId, long latestCompletedCheckpointId) {
             return CompletableFuture.completedFuture(null);
         }
     }
@@ -394,15 +355,8 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
             if (suspension == null) {
                 suspension = controller.suspendDefaultAction();
             } else {
-                controller.allActionsCompleted();
-            }
-        }
-
-        @Override
-        public void finishTask() throws Exception {
-            finishingLatch.await();
-            if (suspension != null) {
-                suspension.resume();
+                controller.suspendDefaultAction();
+                mailboxProcessor.suspend();
             }
         }
     }
@@ -425,7 +379,8 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
             if (suspension == null) {
                 suspension = controller.suspendDefaultAction();
             } else {
-                controller.allActionsCompleted();
+                controller.suspendDefaultAction();
+                mailboxProcessor.suspend();
             }
         }
 
@@ -438,7 +393,7 @@ public class JobMasterStopWithSavepointITCase extends AbstractTestBase {
         }
 
         @Override
-        public Future<Boolean> triggerCheckpointAsync(
+        public CompletableFuture<Boolean> triggerCheckpointAsync(
                 final CheckpointMetaData checkpointMetaData,
                 final CheckpointOptions checkpointOptions) {
             final long taskIndex = getEnvironment().getTaskInfo().getIndexOfThisSubtask();

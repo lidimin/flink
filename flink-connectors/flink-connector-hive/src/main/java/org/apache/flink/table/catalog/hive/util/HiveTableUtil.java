@@ -25,12 +25,12 @@ import org.apache.flink.sql.parser.hive.ddl.SqlCreateHiveTable.HiveTableRowForma
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.api.constraints.UniqueConstraint;
 import org.apache.flink.table.catalog.CatalogBaseTable;
-import org.apache.flink.table.catalog.CatalogPropertiesUtil;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.CatalogView;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.hive.HiveCatalog;
 import org.apache.flink.table.catalog.hive.HiveCatalogConfig;
+import org.apache.flink.table.catalog.hive.client.HiveMetastoreClientWrapper;
 import org.apache.flink.table.catalog.hive.client.HiveShim;
 import org.apache.flink.table.descriptors.DescriptorProperties;
 import org.apache.flink.table.descriptors.Schema;
@@ -79,6 +79,9 @@ import static org.apache.flink.sql.parser.hive.ddl.SqlCreateHiveTable.HiveTableS
 import static org.apache.flink.sql.parser.hive.ddl.SqlCreateHiveTable.TABLE_IS_EXTERNAL;
 import static org.apache.flink.sql.parser.hive.ddl.SqlCreateHiveTable.TABLE_LOCATION_URI;
 import static org.apache.flink.table.catalog.CatalogPropertiesUtil.FLINK_PROPERTY_PREFIX;
+import static org.apache.flink.table.catalog.CatalogPropertiesUtil.IS_GENERIC;
+import static org.apache.flink.table.descriptors.ConnectorDescriptorValidator.CONNECTOR_TYPE;
+import static org.apache.flink.table.factories.FactoryUtil.CONNECTOR;
 import static org.apache.flink.util.Preconditions.checkArgument;
 
 /** Utils to for Hive-backed table. */
@@ -91,6 +94,25 @@ public class HiveTableUtil {
     private static final StorageFormatFactory storageFormatFactory = new StorageFormatFactory();
 
     private HiveTableUtil() {}
+
+    public static TableSchema createTableSchema(
+            HiveConf hiveConf,
+            Table hiveTable,
+            HiveMetastoreClientWrapper client,
+            HiveShim hiveShim) {
+        List<FieldSchema> fields = getNonPartitionFields(hiveConf, hiveTable, hiveShim);
+        Set<String> notNullColumns =
+                client.getNotNullColumns(hiveConf, hiveTable.getDbName(), hiveTable.getTableName());
+        Optional<UniqueConstraint> primaryKey =
+                client.getPrimaryKey(
+                        hiveTable.getDbName(),
+                        hiveTable.getTableName(),
+                        HiveTableUtil.relyConstraint((byte) 0));
+        // PK columns cannot be null
+        primaryKey.ifPresent(pk -> notNullColumns.addAll(pk.getColumns()));
+        return createTableSchema(
+                fields, hiveTable.getPartitionKeys(), notNullColumns, primaryKey.orElse(null));
+    }
 
     /** Create a Flink's TableSchema from Hive table's columns and partition keys. */
     public static TableSchema createTableSchema(
@@ -226,7 +248,7 @@ public class HiveTableUtil {
      * Extract DDL semantics from properties and use it to initiate the table. The related
      * properties will be removed from the map after they're used.
      */
-    public static void initiateTableFromProperties(
+    private static void initiateTableFromProperties(
             Table hiveTable, Map<String, String> properties, HiveConf hiveConf) {
         extractExternal(hiveTable, properties);
         extractRowFormat(hiveTable.getSd(), properties);
@@ -341,6 +363,7 @@ public class HiveTableUtil {
 
     public static Table instantiateHiveTable(
             ObjectPath tablePath, CatalogBaseTable table, HiveConf hiveConf) {
+        final boolean isView = table instanceof CatalogView;
         // let Hive set default parameters for us, e.g. serialization.format
         Table hiveTable =
                 org.apache.hadoop.hive.ql.metadata.Table.getEmptyTable(
@@ -353,24 +376,16 @@ public class HiveTableUtil {
             properties.put(HiveCatalogConfig.COMMENT, table.getComment());
         }
 
-        boolean isGeneric = HiveCatalog.isGenericForCreate(properties);
+        boolean isHiveTable = HiveCatalog.isHiveTable(properties);
 
         // Hive table's StorageDescriptor
         StorageDescriptor sd = hiveTable.getSd();
         HiveTableUtil.setDefaultStorageFormat(sd, hiveConf);
 
-        if (isGeneric) {
-            DescriptorProperties tableSchemaProps = new DescriptorProperties(true);
-            tableSchemaProps.putTableSchema(Schema.SCHEMA, table.getSchema());
-
-            if (table instanceof CatalogTable) {
-                tableSchemaProps.putPartitionKeys(((CatalogTable) table).getPartitionKeys());
-            }
-
-            properties.putAll(tableSchemaProps.asMap());
-            properties = maskFlinkProperties(properties);
-            hiveTable.setParameters(properties);
-        } else {
+        // We always store schema as properties for view, because view schema may not be mapped to
+        // hive schema. This also means views created by flink cannot be used in hive, which is fine
+        // because hive cannot understand the expanded query anyway
+        if (isHiveTable && !isView) {
             HiveTableUtil.initiateTableFromProperties(hiveTable, properties, hiveConf);
             List<FieldSchema> allColumns = HiveTableUtil.createHiveColumns(table.getSchema());
             // Table columns and partition keys
@@ -396,9 +411,29 @@ public class HiveTableUtil {
             }
             // Table properties
             hiveTable.getParameters().putAll(properties);
+        } else {
+            DescriptorProperties tableSchemaProps = new DescriptorProperties(true);
+            tableSchemaProps.putTableSchema(Schema.SCHEMA, table.getSchema());
+
+            if (table instanceof CatalogTable) {
+                tableSchemaProps.putPartitionKeys(((CatalogTable) table).getPartitionKeys());
+            }
+
+            properties.putAll(tableSchemaProps.asMap());
+            properties = maskFlinkProperties(properties);
+            // we may need to explicitly set is_generic flag in the following cases:
+            // 1. user doesn't specify 'connector' or 'connector.type' when creating a table, w/o
+            // 'is_generic', such a table will be considered as a hive table upon retrieval
+            // 2. when creating views which don't have connector properties
+            if (isView
+                    || (!properties.containsKey(FLINK_PROPERTY_PREFIX + CONNECTOR.key())
+                            && !properties.containsKey(FLINK_PROPERTY_PREFIX + CONNECTOR_TYPE))) {
+                properties.put(IS_GENERIC, "true");
+            }
+            hiveTable.setParameters(properties);
         }
 
-        if (table instanceof CatalogView) {
+        if (isView) {
             // TODO: [FLINK-12398] Support partitioned view in catalog API
             hiveTable.setPartitionKeys(new ArrayList<>());
 
@@ -413,32 +448,25 @@ public class HiveTableUtil {
 
     /**
      * Add a prefix to Flink-created properties to distinguish them from Hive-created properties.
-     * Note that 'is_generic' is a special key and this method will leave it as-is.
      */
-    public static Map<String, String> maskFlinkProperties(Map<String, String> properties) {
+    private static Map<String, String> maskFlinkProperties(Map<String, String> properties) {
         return properties.entrySet().stream()
                 .filter(e -> e.getKey() != null && e.getValue() != null)
-                .map(
-                        e ->
-                                new Tuple2<>(
-                                        e.getKey().equals(CatalogPropertiesUtil.IS_GENERIC)
-                                                ? e.getKey()
-                                                : FLINK_PROPERTY_PREFIX + e.getKey(),
-                                        e.getValue()))
+                .map(e -> new Tuple2<>(FLINK_PROPERTY_PREFIX + e.getKey(), e.getValue()))
                 .collect(Collectors.toMap(t -> t.f0, t -> t.f1));
     }
 
     /**
      * Check whether to read or write on the hive ACID table.
      *
-     * @param catalogTable Hive catalog table.
+     * @param tableOptions Hive table options.
      * @param tablePath Identifier table path.
      * @throws FlinkHiveException Thrown, if the source or sink table is transactional.
      */
-    public static void checkAcidTable(CatalogTable catalogTable, ObjectPath tablePath) {
-        String tableIsTransactional = catalogTable.getOptions().get("transactional");
+    public static void checkAcidTable(Map<String, String> tableOptions, ObjectPath tablePath) {
+        String tableIsTransactional = tableOptions.get("transactional");
         if (tableIsTransactional == null) {
-            tableIsTransactional = catalogTable.getOptions().get("transactional".toUpperCase());
+            tableIsTransactional = tableOptions.get("transactional".toUpperCase());
         }
         if (tableIsTransactional != null && tableIsTransactional.equalsIgnoreCase("true")) {
             throw new FlinkHiveException(
@@ -568,6 +596,18 @@ public class HiveTableUtil {
         public String visit(Expression other) {
             // only support resolved expressions
             return null;
+        }
+    }
+
+    public static List<FieldSchema> getNonPartitionFields(
+            HiveConf hiveConf, Table hiveTable, HiveShim hiveShim) {
+        if (org.apache.hadoop.hive.ql.metadata.Table.hasMetastoreBasedSchema(
+                hiveConf, hiveTable.getSd().getSerdeInfo().getSerializationLib())) {
+            // get schema from metastore
+            return hiveTable.getSd().getCols();
+        } else {
+            // get schema from deserializer
+            return hiveShim.getFieldsFromDeserializer(hiveConf, hiveTable, true);
         }
     }
 }

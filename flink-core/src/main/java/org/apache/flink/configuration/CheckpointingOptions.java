@@ -100,16 +100,6 @@ public class CheckpointingOptions {
                                             "Recognized shortcut names are 'jobmanager' and 'filesystem'.")
                                     .build());
 
-    /** Whether to enable state change log. */
-    @Documentation.Section(value = Documentation.Sections.COMMON_STATE_BACKENDS)
-    @Documentation.ExcludeFromDocumentation("Hidden for now")
-    public static final ConfigOption<Boolean> ENABLE_STATE_CHANGE_LOG =
-            ConfigOptions.key("state.backend.changelog.enabled")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            "Whether to enable state backend to write state changes to StateChangelog.");
-
     /** The maximum number of completed checkpoints to retain. */
     @Documentation.Section(Documentation.Sections.COMMON_STATE_BACKENDS)
     public static final ConfigOption<Integer> MAX_RETAINED_CHECKPOINTS =
@@ -117,7 +107,7 @@ public class CheckpointingOptions {
                     .defaultValue(1)
                     .withDescription("The maximum number of completed checkpoints to retain.");
 
-    /** @deprecated Checkpoints are aways asynchronous. */
+    /** @deprecated Checkpoints are always asynchronous. */
     @Deprecated
     public static final ConfigOption<Boolean> ASYNC_SNAPSHOTS =
             ConfigOptions.key("state.backend.async")
@@ -159,8 +149,8 @@ public class CheckpointingOptions {
                     .defaultValue(false)
                     .withDescription(
                             "This option configures local recovery for this state backend. By default, local recovery is "
-                                    + "deactivated. Local recovery currently only covers keyed state backends. Currently, MemoryStateBackend and "
-                                    + "HashMapStateBackend do not support local recovery and ignore this option.");
+                                    + "deactivated. Local recovery currently only covers keyed state backends. Currently, the MemoryStateBackend "
+                                    + "does not support local recovery and ignores this option.");
 
     /**
      * The config parameter defining the root directories for storing file-based state for local
@@ -174,9 +164,18 @@ public class CheckpointingOptions {
             ConfigOptions.key("taskmanager.state.local.root-dirs")
                     .noDefaultValue()
                     .withDescription(
-                            "The config parameter defining the root directories for storing file-based state for local "
-                                    + "recovery. Local recovery currently only covers keyed state backends. Currently, MemoryStateBackend does "
-                                    + "not support local recovery and ignore this option");
+                            Description.builder()
+                                    .text(
+                                            "The config parameter defining the root directories for storing file-based "
+                                                    + "state for local recovery. Local recovery currently only covers keyed "
+                                                    + "state backends. Currently, MemoryStateBackend does not support local "
+                                                    + "recovery and ignores this option. If not configured it will default "
+                                                    + "to <WORKING_DIR>/localState. The <WORKING_DIR> can be configured via %s",
+                                            TextElement.code(
+                                                    ClusterOptions
+                                                            .TASK_MANAGER_PROCESS_WORKING_DIR_BASE
+                                                            .key()))
+                                    .build());
 
     // ------------------------------------------------------------------------
     //  Options specific to the file-system-based state backends

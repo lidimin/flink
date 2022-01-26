@@ -18,6 +18,10 @@
 
 package org.apache.flink.table.factories;
 
+import org.apache.flink.connector.datagen.table.DataGenConnectorOptions;
+import org.apache.flink.connector.datagen.table.DataGenConnectorOptionsUtil;
+import org.apache.flink.connector.datagen.table.DataGenTableSource;
+import org.apache.flink.connector.datagen.table.DataGenTableSourceFactory;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.functions.source.datagen.DataGeneratorSource;
 import org.apache.flink.streaming.api.functions.source.datagen.DataGeneratorSourceTest;
@@ -31,8 +35,8 @@ import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.descriptors.DescriptorProperties;
-import org.apache.flink.table.factories.datagen.DataGenTableSource;
 import org.apache.flink.util.InstantiationUtil;
 
 import org.junit.Assert;
@@ -44,17 +48,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.END;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.FIELDS;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.KIND;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.LENGTH;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.MAX;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.MIN;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.NUMBER_OF_ROWS;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.RANDOM;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.ROWS_PER_SECOND;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.SEQUENCE;
-import static org.apache.flink.table.factories.DataGenTableSourceFactory.START;
 import static org.apache.flink.table.factories.utils.FactoryMocks.createTableSource;
 import static org.junit.Assert.assertTrue;
 
@@ -65,7 +58,8 @@ public class DataGenTableSourceFactoryTest {
             ResolvedSchema.of(
                     Column.physical("f0", DataTypes.STRING()),
                     Column.physical("f1", DataTypes.BIGINT()),
-                    Column.physical("f2", DataTypes.BIGINT()));
+                    Column.physical("f2", DataTypes.BIGINT()),
+                    Column.physical("f3", DataTypes.TIMESTAMP()));
 
     @Test
     public void testDataTypeCoverage() throws Exception {
@@ -104,7 +98,23 @@ public class DataGenTableSourceFactoryTest {
 
         DescriptorProperties descriptor = new DescriptorProperties();
         descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-        descriptor.putString(NUMBER_OF_ROWS.key(), "10");
+        descriptor.putString(DataGenConnectorOptions.NUMBER_OF_ROWS.key(), "10");
+
+        // add min max option for numeric types
+        descriptor.putString("fields.f4.min", "1.0");
+        descriptor.putString("fields.f4.max", "1000.0");
+        descriptor.putString("fields.f5.min", "0");
+        descriptor.putString("fields.f5.max", "127");
+        descriptor.putString("fields.f6.min", "0");
+        descriptor.putString("fields.f6.max", "32767");
+        descriptor.putString("fields.f7.min", "0");
+        descriptor.putString("fields.f7.max", "65535");
+        descriptor.putString("fields.f8.min", "0");
+        descriptor.putString("fields.f8.max", String.valueOf(Long.MAX_VALUE));
+        descriptor.putString("fields.f9.min", "0");
+        descriptor.putString("fields.f9.max", String.valueOf(Float.MAX_VALUE));
+        descriptor.putString("fields.f10.min", "0");
+        descriptor.putString("fields.f10.max", String.valueOf(Double.MAX_VALUE));
 
         List<RowData> results = runGenerator(schema, descriptor);
         Assert.assertEquals("Failed to generate all rows", 10, results.size());
@@ -122,20 +132,42 @@ public class DataGenTableSourceFactoryTest {
     public void testSource() throws Exception {
         DescriptorProperties descriptor = new DescriptorProperties();
         descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-        descriptor.putLong(ROWS_PER_SECOND.key(), 100);
+        descriptor.putLong(DataGenConnectorOptions.ROWS_PER_SECOND.key(), 100);
 
-        descriptor.putString(FIELDS + ".f0." + KIND, RANDOM);
-        descriptor.putLong(FIELDS + ".f0." + LENGTH, 20);
+        descriptor.putString(
+                DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                DataGenConnectorOptionsUtil.RANDOM);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.LENGTH,
+                20);
 
-        descriptor.putString(FIELDS + ".f1." + KIND, RANDOM);
-        descriptor.putLong(FIELDS + ".f1." + MIN, 10);
-        descriptor.putLong(FIELDS + ".f1." + MAX, 100);
+        descriptor.putString(
+                DataGenConnectorOptionsUtil.FIELDS + ".f1." + DataGenConnectorOptionsUtil.KIND,
+                DataGenConnectorOptionsUtil.RANDOM);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f1." + DataGenConnectorOptionsUtil.MIN, 10);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f1." + DataGenConnectorOptionsUtil.MAX, 100);
 
-        descriptor.putString(FIELDS + ".f2." + KIND, SEQUENCE);
-        descriptor.putLong(FIELDS + ".f2." + START, 50);
-        descriptor.putLong(FIELDS + ".f2." + END, 60);
+        descriptor.putString(
+                DataGenConnectorOptionsUtil.FIELDS + ".f2." + DataGenConnectorOptionsUtil.KIND,
+                DataGenConnectorOptionsUtil.SEQUENCE);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f2." + DataGenConnectorOptionsUtil.START,
+                50);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f2." + DataGenConnectorOptionsUtil.END, 60);
 
+        descriptor.putString(
+                DataGenConnectorOptionsUtil.FIELDS + ".f3." + DataGenConnectorOptionsUtil.KIND,
+                DataGenConnectorOptionsUtil.RANDOM);
+        descriptor.putString(
+                DataGenConnectorOptionsUtil.FIELDS + ".f3." + DataGenConnectorOptionsUtil.MAX_PAST,
+                "5s");
+
+        final long begin = System.currentTimeMillis();
         List<RowData> results = runGenerator(SCHEMA, descriptor);
+        final long end = System.currentTimeMillis();
 
         Assert.assertEquals(11, results.size());
         for (int i = 0; i < results.size(); i++) {
@@ -144,6 +176,8 @@ public class DataGenTableSourceFactoryTest {
             long f1 = row.getLong(1);
             Assert.assertTrue(f1 >= 10 && f1 <= 100);
             Assert.assertEquals(i + 50, row.getLong(2));
+            final TimestampData f3 = row.getTimestamp(3, 3);
+            Assert.assertTrue(f3.getMillisecond() >= begin - 5000 && f3.getMillisecond() <= end);
         }
     }
 
@@ -175,9 +209,13 @@ public class DataGenTableSourceFactoryTest {
     public void testSequenceCheckpointRestore() throws Exception {
         DescriptorProperties descriptor = new DescriptorProperties();
         descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-        descriptor.putString(FIELDS + ".f0." + KIND, SEQUENCE);
-        descriptor.putLong(FIELDS + ".f0." + START, 0);
-        descriptor.putLong(FIELDS + ".f0." + END, 100);
+        descriptor.putString(
+                DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                DataGenConnectorOptionsUtil.SEQUENCE);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.START, 0);
+        descriptor.putLong(
+                DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.END, 100);
 
         DynamicTableSource dynamicTableSource =
                 createTableSource(
@@ -209,8 +247,12 @@ public class DataGenTableSourceFactoryTest {
         try {
             DescriptorProperties descriptor = new DescriptorProperties();
             descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-            descriptor.putString(FIELDS + ".f0." + KIND, SEQUENCE);
-            descriptor.putLong(FIELDS + ".f0." + END, 100);
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                    DataGenConnectorOptionsUtil.SEQUENCE);
+            descriptor.putLong(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.END,
+                    100);
 
             createTableSource(
                     ResolvedSchema.of(Column.physical("f0", DataTypes.BIGINT())),
@@ -233,8 +275,12 @@ public class DataGenTableSourceFactoryTest {
         try {
             DescriptorProperties descriptor = new DescriptorProperties();
             descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-            descriptor.putString(FIELDS + ".f0." + KIND, SEQUENCE);
-            descriptor.putLong(FIELDS + ".f0." + START, 0);
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                    DataGenConnectorOptionsUtil.SEQUENCE);
+            descriptor.putLong(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.START,
+                    0);
 
             createTableSource(
                     ResolvedSchema.of(Column.physical("f0", DataTypes.BIGINT())),
@@ -278,8 +324,12 @@ public class DataGenTableSourceFactoryTest {
         try {
             DescriptorProperties descriptor = new DescriptorProperties();
             descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-            descriptor.putString(FIELDS + ".f0." + KIND, RANDOM);
-            descriptor.putLong(FIELDS + ".f0." + START, 0);
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                    DataGenConnectorOptionsUtil.RANDOM);
+            descriptor.putLong(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.START,
+                    0);
 
             createTableSource(
                     ResolvedSchema.of(Column.physical("f0", DataTypes.BIGINT())),
@@ -300,8 +350,14 @@ public class DataGenTableSourceFactoryTest {
         try {
             DescriptorProperties descriptor = new DescriptorProperties();
             descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-            descriptor.putString(FIELDS + ".f0." + KIND, RANDOM);
-            descriptor.putInt(FIELDS + ".f0." + LENGTH, 100);
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                    DataGenConnectorOptionsUtil.RANDOM);
+            descriptor.putInt(
+                    DataGenConnectorOptionsUtil.FIELDS
+                            + ".f0."
+                            + DataGenConnectorOptionsUtil.LENGTH,
+                    100);
 
             createTableSource(
                     ResolvedSchema.of(Column.physical("f0", DataTypes.BIGINT())),
@@ -322,9 +378,15 @@ public class DataGenTableSourceFactoryTest {
         try {
             DescriptorProperties descriptor = new DescriptorProperties();
             descriptor.putString(FactoryUtil.CONNECTOR.key(), "datagen");
-            descriptor.putString(FIELDS + ".f0." + KIND, SEQUENCE);
-            descriptor.putString(FIELDS + ".f0." + START, "Wrong");
-            descriptor.putString(FIELDS + ".f0." + END, "Wrong");
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.KIND,
+                    DataGenConnectorOptionsUtil.SEQUENCE);
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.START,
+                    "Wrong");
+            descriptor.putString(
+                    DataGenConnectorOptionsUtil.FIELDS + ".f0." + DataGenConnectorOptionsUtil.END,
+                    "Wrong");
 
             createTableSource(
                     ResolvedSchema.of(Column.physical("f0", DataTypes.BIGINT())),

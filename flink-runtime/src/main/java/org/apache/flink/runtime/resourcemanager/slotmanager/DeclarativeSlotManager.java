@@ -23,8 +23,6 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.clusterframework.types.SlotID;
-import org.apache.flink.runtime.concurrent.FutureUtils;
-import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.instance.InstanceID;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.metrics.MetricNames;
@@ -41,6 +39,8 @@ import org.apache.flink.runtime.taskexecutor.TaskExecutorGateway;
 import org.apache.flink.runtime.taskexecutor.exceptions.SlotOccupiedException;
 import org.apache.flink.runtime.util.ResourceCounter;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.FutureUtils;
+import org.apache.flink.util.concurrent.ScheduledExecutor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -182,7 +182,7 @@ public class DeclarativeSlotManager implements SlotManager {
             ResourceManagerId newResourceManagerId,
             Executor newMainThreadExecutor,
             ResourceActions newResourceActions) {
-        LOG.info("Starting the slot manager.");
+        LOG.debug("Starting the slot manager.");
 
         this.resourceManagerId = Preconditions.checkNotNull(newResourceManagerId);
         mainThreadExecutor = Preconditions.checkNotNull(newMainThreadExecutor);
@@ -211,6 +211,8 @@ public class DeclarativeSlotManager implements SlotManager {
 
         LOG.info("Suspending the slot manager.");
 
+        slotManagerMetricGroup.close();
+
         resourceTracker.clear();
         if (taskExecutorManager != null) {
             taskExecutorManager.close();
@@ -238,7 +240,6 @@ public class DeclarativeSlotManager implements SlotManager {
         LOG.info("Closing the slot manager.");
 
         suspend();
-        slotManagerMetricGroup.close();
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -246,18 +247,29 @@ public class DeclarativeSlotManager implements SlotManager {
     // ---------------------------------------------------------------------------------------------
 
     @Override
+    public void clearResourceRequirements(JobID jobId) {
+        checkInit();
+        maybeReclaimInactiveSlots(jobId);
+        jobMasterTargetAddresses.remove(jobId);
+        resourceTracker.notifyResourceRequirements(jobId, Collections.emptyList());
+    }
+
+    @Override
     public void processResourceRequirements(ResourceRequirements resourceRequirements) {
         checkInit();
-        LOG.debug(
-                "Received resource requirements from job {}: {}",
-                resourceRequirements.getJobId(),
-                resourceRequirements.getResourceRequirements());
-
-        if (resourceRequirements.getResourceRequirements().isEmpty()) {
-            jobMasterTargetAddresses.remove(resourceRequirements.getJobId());
-
-            maybeReclaimInactiveSlots(resourceRequirements.getJobId());
+        if (resourceRequirements.getResourceRequirements().isEmpty()
+                && resourceTracker.isRequirementEmpty(resourceRequirements.getJobId())) {
+            return;
+        } else if (resourceRequirements.getResourceRequirements().isEmpty()) {
+            LOG.info("Clearing resource requirements of job {}", resourceRequirements.getJobId());
         } else {
+            LOG.info(
+                    "Received resource requirements from job {}: {}",
+                    resourceRequirements.getJobId(),
+                    resourceRequirements.getResourceRequirements());
+        }
+
+        if (!resourceRequirements.getResourceRequirements().isEmpty()) {
             jobMasterTargetAddresses.put(
                     resourceRequirements.getJobId(), resourceRequirements.getTargetAddress());
         }
@@ -638,7 +650,10 @@ public class DeclarativeSlotManager implements SlotManager {
                     pendingSlots = allocationResult.getNewAvailableResources();
                     if (!allocationResult.isSuccessfulAllocating()
                             && sendNotEnoughResourceNotifications) {
-                        LOG.warn("Could not fulfill resource requirements of job {}.", jobId);
+                        LOG.warn(
+                                "Could not fulfill resource requirements of job {}. Free slots: {}",
+                                jobId,
+                                slotTracker.getFreeSlots().size());
                         resourceActions.notifyNotEnoughResourcesAvailable(
                                 jobId, resourceTracker.getAcquiredResources(jobId));
                         return pendingSlots;
@@ -741,12 +756,6 @@ public class DeclarativeSlotManager implements SlotManager {
     public Collection<SlotInfo> getAllocatedSlotsOf(InstanceID instanceID) {
         // This information is currently not supported for this slot manager.
         return Collections.emptyList();
-    }
-
-    @Override
-    public int getNumberPendingSlotRequests() {
-        // only exists for testing purposes
-        throw new UnsupportedOperationException();
     }
 
     // ---------------------------------------------------------------------------------------------

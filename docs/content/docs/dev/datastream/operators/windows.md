@@ -44,7 +44,7 @@ for the rest of the page.
           [.evictor(...)]            <-  optional: "evictor" (else no evictor)
           [.allowedLateness(...)]    <-  optional: "lateness" (else zero)
           [.sideOutputLateData(...)] <-  optional: "output tag" (else no side output for late data)
-           .reduce/aggregate/fold/apply()      <-  required: "function"
+           .reduce/aggregate/apply()      <-  required: "function"
           [.getSideOutput(...)]      <-  optional: "output tag"
 
 **Non-Keyed Windows**
@@ -55,7 +55,7 @@ for the rest of the page.
           [.evictor(...)]            <-  optional: "evictor" (else no evictor)
           [.allowedLateness(...)]    <-  optional: "lateness" (else zero)
           [.sideOutputLateData(...)] <-  optional: "output tag" (else no side output for late data)
-           .reduce/aggregate/fold/apply()      <-  required: "function"
+           .reduce/aggregate/apply()      <-  required: "function"
           [.getSideOutput(...)]      <-  optional: "output tag"
 
 In the above, the commands in square brackets ([...]) are optional. This reveals that Flink allows you to customize your
@@ -86,8 +86,8 @@ Apart from the above, you can specify an `Evictor` (see [Evictors](#evictors)) w
 elements from the window after the trigger fires and before and/or after the function is applied.
 
 In the following we go into more detail for each of the components above. We start with the required parts in the above
-snippet (see [Keyed vs Non-Keyed Windows](#keyed-vs-non-keyed-windows), [Window Assigner](#window-assigner), and
-[Window Function](#window-function)) before moving to the optional ones.
+snippet (see [Keyed vs Non-Keyed Windows](#keyed-vs-non-keyed-windows), [Window Assigners](#window-assigners), and
+[Window Functions](#window-functions)) before moving to the optional ones.
 
 ## Keyed vs Non-Keyed Windows
 

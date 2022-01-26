@@ -20,13 +20,13 @@
 package org.apache.flink.runtime.scheduler;
 
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
+import org.apache.flink.runtime.checkpoint.CheckpointsCleaner;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
-import org.apache.flink.runtime.concurrent.FutureUtils;
-import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
@@ -43,13 +43,19 @@ import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableExceptio
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.jobmaster.LogicalSlot;
 import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
-import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
+import org.apache.flink.runtime.operators.coordination.OperatorCoordinatorHolder;
+import org.apache.flink.runtime.scheduler.exceptionhistory.FailureHandlingResultSnapshot;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 import org.apache.flink.runtime.scheduler.strategy.SchedulingStrategy;
 import org.apache.flink.runtime.scheduler.strategy.SchedulingStrategyFactory;
 import org.apache.flink.runtime.scheduler.strategy.SchedulingTopology;
+import org.apache.flink.runtime.shuffle.ShuffleMaster;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
+import org.apache.flink.runtime.topology.Vertex;
 import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.IterableUtils;
+import org.apache.flink.util.concurrent.FutureUtils;
+import org.apache.flink.util.concurrent.ScheduledExecutor;
 
 import org.slf4j.Logger;
 
@@ -57,6 +63,7 @@ import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -94,6 +101,17 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
     private final Set<ExecutionVertexID> verticesWaitingForRestart;
 
+    private final ShuffleMaster<?> shuffleMaster;
+
+    private final Time rpcTimeout;
+
+    private final Map<AllocationID, Long> reservedAllocationRefCounters;
+
+    // once an execution vertex is assigned an allocation/slot, it will reserve the allocation
+    // until it is assigned a new allocation, or it finishes and does not need the allocation
+    // anymore. The reserved allocation information is needed for local recovery.
+    private final Map<ExecutionVertexID, AllocationID> reservedAllocationByExecutionVertex;
+
     DefaultScheduler(
             final Logger log,
             final JobGraph jobGraph,
@@ -102,6 +120,7 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
             final Consumer<ComponentMainThreadExecutor> startUpAction,
             final ScheduledExecutor delayExecutor,
             final ClassLoader userCodeLoader,
+            final CheckpointsCleaner checkpointsCleaner,
             final CheckpointRecoveryFactory checkpointRecoveryFactory,
             final JobManagerJobMetricGroup jobManagerJobMetricGroup,
             final SchedulingStrategyFactory schedulingStrategyFactory,
@@ -113,7 +132,9 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
             long initializationTimestamp,
             final ComponentMainThreadExecutor mainThreadExecutor,
             final JobStatusListener jobStatusListener,
-            final ExecutionGraphFactory executionGraphFactory)
+            final ExecutionGraphFactory executionGraphFactory,
+            final ShuffleMaster<?> shuffleMaster,
+            final Time rpcTimeout)
             throws Exception {
 
         super(
@@ -122,19 +143,26 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
                 ioExecutor,
                 jobMasterConfiguration,
                 userCodeLoader,
+                checkpointsCleaner,
                 checkpointRecoveryFactory,
                 jobManagerJobMetricGroup,
                 executionVertexVersioner,
                 initializationTimestamp,
                 mainThreadExecutor,
                 jobStatusListener,
-                executionGraphFactory);
+                executionGraphFactory,
+                computeVertexParallelismStore(jobGraph));
 
         this.log = log;
 
         this.delayExecutor = checkNotNull(delayExecutor);
         this.userCodeLoader = checkNotNull(userCodeLoader);
         this.executionVertexOperations = checkNotNull(executionVertexOperations);
+        this.shuffleMaster = checkNotNull(shuffleMaster);
+        this.rpcTimeout = checkNotNull(rpcTimeout);
+
+        this.reservedAllocationRefCounters = new HashMap<>();
+        this.reservedAllocationByExecutionVertex = new HashMap<>();
 
         final FailoverStrategy failoverStrategy =
                 failoverStrategyFactory.create(
@@ -169,6 +197,13 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
     }
 
     @Override
+    protected void cancelAllPendingSlotRequestsInternal() {
+        IterableUtils.toStream(getSchedulingTopology().getVertices())
+                .map(Vertex::getId)
+                .forEach(executionSlotAllocator::cancel);
+    }
+
+    @Override
     protected void startSchedulingInternal() {
         log.info(
                 "Starting scheduling with scheduling strategy [{}]",
@@ -181,6 +216,16 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
     protected void updateTaskExecutionStateInternal(
             final ExecutionVertexID executionVertexId,
             final TaskExecutionStateTransition taskExecutionState) {
+
+        // once a task finishes, it will release the assigned allocation/slot and no longer
+        // needs it. Therefore, it should stop reserving the slot so that other tasks are
+        // possible to use the slot. Ideally, the `stopReserveAllocation` should happen
+        // along with the release slot process. However, that process is hidden in the depth
+        // of the ExecutionGraph, so we currently do it in DefaultScheduler after that process
+        // is done.
+        if (taskExecutionState.getExecutionState() == ExecutionState.FINISHED) {
+            stopReserveAllocation(executionVertexId);
+        }
 
         schedulingStrategy.onExecutionStateChange(
                 executionVertexId, taskExecutionState.getExecutionState());
@@ -251,12 +296,17 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
         final CompletableFuture<?> cancelFuture = cancelTasksAsync(verticesToRestart);
 
+        final FailureHandlingResultSnapshot failureHandlingResultSnapshot =
+                FailureHandlingResultSnapshot.create(
+                        failureHandlingResult,
+                        id -> this.getExecutionVertex(id).getCurrentExecutionAttempt());
         delayExecutor.schedule(
                 () ->
                         FutureUtils.assertNoException(
                                 cancelFuture.thenRunAsync(
                                         () -> {
-                                            archiveFromFailureHandlingResult(failureHandlingResult);
+                                            archiveFromFailureHandlingResult(
+                                                    failureHandlingResultSnapshot);
                                             restartTasks(executionVertexVersions, globalRecovery);
                                         },
                                         getMainThreadExecutor())),
@@ -297,6 +347,10 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
     }
 
     private CompletableFuture<?> cancelTasksAsync(final Set<ExecutionVertexID> verticesToRestart) {
+        // clean up all the related pending requests to avoid that immediately returned slot
+        // is used to fulfill the pending requests of these tasks
+        verticesToRestart.stream().forEach(executionSlotAllocator::cancel);
+
         final List<CompletableFuture<?>> cancelFutures =
                 verticesToRestart.stream()
                         .map(this::cancelExecutionVertex)
@@ -310,7 +364,6 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
         notifyCoordinatorOfCancellation(vertex);
 
-        executionSlotAllocator.cancel(executionVertexId);
         return executionVertexOperations.cancel(vertex);
     }
 
@@ -407,21 +460,33 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
     private void waitForAllSlotsAndDeploy(final List<DeploymentHandle> deploymentHandles) {
         FutureUtils.assertNoException(
-                assignAllResources(deploymentHandles).handle(deployAll(deploymentHandles)));
+                assignAllResourcesAndRegisterProducedPartitions(deploymentHandles)
+                        .handle(deployAll(deploymentHandles)));
     }
 
-    private CompletableFuture<Void> assignAllResources(
+    private CompletableFuture<Void> assignAllResourcesAndRegisterProducedPartitions(
             final List<DeploymentHandle> deploymentHandles) {
-        final List<CompletableFuture<Void>> slotAssignedFutures = new ArrayList<>();
+        final List<CompletableFuture<Void>> resultFutures = new ArrayList<>();
         for (DeploymentHandle deploymentHandle : deploymentHandles) {
-            final CompletableFuture<Void> slotAssigned =
+            final CompletableFuture<Void> resultFuture =
                     deploymentHandle
                             .getSlotExecutionVertexAssignment()
                             .getLogicalSlotFuture()
-                            .handle(assignResourceOrHandleError(deploymentHandle));
-            slotAssignedFutures.add(slotAssigned);
+                            .handle(assignResource(deploymentHandle))
+                            .thenCompose(registerProducedPartitions(deploymentHandle))
+                            .handle(
+                                    (ignore, throwable) -> {
+                                        if (throwable != null) {
+                                            handleTaskDeploymentFailure(
+                                                    deploymentHandle.getExecutionVertexId(),
+                                                    throwable);
+                                        }
+                                        return null;
+                                    });
+
+            resultFutures.add(resultFuture);
         }
-        return FutureUtils.waitForAll(slotAssignedFutures);
+        return FutureUtils.waitForAll(resultFutures);
     }
 
     private BiFunction<Void, Throwable, Void> deployAll(
@@ -448,7 +513,7 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
         }
     }
 
-    private BiFunction<LogicalSlot, Throwable, Void> assignResourceOrHandleError(
+    private BiFunction<LogicalSlot, Throwable, LogicalSlot> assignResource(
             final DeploymentHandle deploymentHandle) {
         final ExecutionVertexVersion requiredVertexVersion =
                 deploymentHandle.getRequiredVertexVersion();
@@ -456,28 +521,79 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
 
         return (logicalSlot, throwable) -> {
             if (executionVertexVersioner.isModified(requiredVertexVersion)) {
-                log.debug(
-                        "Refusing to assign slot to execution vertex {} because this deployment was "
-                                + "superseded by another deployment",
-                        executionVertexId);
-                releaseSlotIfPresent(logicalSlot);
+                if (throwable == null) {
+                    log.debug(
+                            "Refusing to assign slot to execution vertex {} because this deployment was "
+                                    + "superseded by another deployment",
+                            executionVertexId);
+                    releaseSlotIfPresent(logicalSlot);
+                }
                 return null;
             }
 
-            if (throwable == null) {
+            // throw exception only if the execution version is not outdated.
+            // this ensures that canceling a pending slot request does not fail
+            // a task which is about to cancel in #restartTasksWithDelay(...)
+            if (throwable != null) {
+                throw new CompletionException(maybeWrapWithNoResourceAvailableException(throwable));
+            }
+
+            final ExecutionVertex executionVertex = getExecutionVertex(executionVertexId);
+            executionVertex.tryAssignResource(logicalSlot);
+
+            startReserveAllocation(executionVertexId, logicalSlot.getAllocationId());
+
+            return logicalSlot;
+        };
+    }
+
+    private void startReserveAllocation(
+            ExecutionVertexID executionVertexId, AllocationID newAllocation) {
+
+        // stop the previous allocation reservation if there is one
+        stopReserveAllocation(executionVertexId);
+
+        reservedAllocationByExecutionVertex.put(executionVertexId, newAllocation);
+        reservedAllocationRefCounters.compute(
+                newAllocation, (ignored, oldCount) -> oldCount == null ? 1 : oldCount + 1);
+    }
+
+    private void stopReserveAllocation(ExecutionVertexID executionVertexId) {
+        final AllocationID priorAllocation =
+                reservedAllocationByExecutionVertex.remove(executionVertexId);
+        if (priorAllocation != null) {
+            reservedAllocationRefCounters.compute(
+                    priorAllocation, (ignored, oldCount) -> oldCount > 1 ? oldCount - 1 : null);
+        }
+    }
+
+    private Function<LogicalSlot, CompletableFuture<Void>> registerProducedPartitions(
+            final DeploymentHandle deploymentHandle) {
+        final ExecutionVertexID executionVertexId = deploymentHandle.getExecutionVertexId();
+
+        return logicalSlot -> {
+            // a null logicalSlot means the slot assignment is skipped, in which case
+            // the produced partition registration process can be skipped as well
+            if (logicalSlot != null) {
                 final ExecutionVertex executionVertex = getExecutionVertex(executionVertexId);
                 final boolean notifyPartitionDataAvailable =
                         deploymentHandle.getDeploymentOption().notifyPartitionDataAvailable();
-                executionVertex
-                        .getCurrentExecutionAttempt()
-                        .registerProducedPartitions(
-                                logicalSlot.getTaskManagerLocation(), notifyPartitionDataAvailable);
-                executionVertex.tryAssignResource(logicalSlot);
+
+                final CompletableFuture<Void> partitionRegistrationFuture =
+                        executionVertex
+                                .getCurrentExecutionAttempt()
+                                .registerProducedPartitions(
+                                        logicalSlot.getTaskManagerLocation(),
+                                        notifyPartitionDataAvailable);
+
+                return FutureUtils.orTimeout(
+                        partitionRegistrationFuture,
+                        rpcTimeout.toMilliseconds(),
+                        TimeUnit.MILLISECONDS,
+                        getMainThreadExecutor());
             } else {
-                handleTaskDeploymentFailure(
-                        executionVertexId, maybeWrapWithNoResourceAvailableException(throwable));
+                return FutureUtils.completedVoidFuture();
             }
-            return null;
         };
     }
 
@@ -550,7 +666,8 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
             return;
         }
 
-        for (OperatorCoordinator coordinator : vertex.getJobVertex().getOperatorCoordinators()) {
+        for (OperatorCoordinatorHolder coordinator :
+                vertex.getJobVertex().getOperatorCoordinators()) {
             coordinator.subtaskFailed(vertex.getParallelSubtaskIndex(), null);
         }
     }
@@ -597,6 +714,11 @@ public class DefaultScheduler extends SchedulerBase implements SchedulerOperatio
         @Override
         public Optional<TaskManagerLocation> getStateLocation(ExecutionVertexID executionVertexId) {
             return stateLocationRetriever.getStateLocation(executionVertexId);
+        }
+
+        @Override
+        public Set<AllocationID> getReservedAllocations() {
+            return reservedAllocationRefCounters.keySet();
         }
     }
 }

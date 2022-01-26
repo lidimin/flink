@@ -57,7 +57,7 @@ public class ContinuousFileSplitEnumeratorTest {
         fileEnumerator.addSplits(split);
         context.triggerAllActions();
 
-        assertThat(enumerator.snapshotState().getSplits(), contains(split));
+        assertThat(enumerator.snapshotState(1L).getSplits(), contains(split));
     }
 
     @Test
@@ -77,7 +77,7 @@ public class ContinuousFileSplitEnumeratorTest {
         fileEnumerator.addSplits(split);
         context.triggerAllActions();
 
-        assertThat(enumerator.snapshotState().getSplits(), empty());
+        assertThat(enumerator.snapshotState(1L).getSplits(), empty());
         assertThat(context.getSplitAssignments().get(2).getAssignedSplits(), contains(split));
     }
 
@@ -102,7 +102,7 @@ public class ContinuousFileSplitEnumeratorTest {
         context.triggerAllActions();
 
         assertFalse(context.getSplitAssignments().containsKey(2));
-        assertThat(enumerator.snapshotState().getSplits(), contains(split));
+        assertThat(enumerator.snapshotState(1L).getSplits(), contains(split));
     }
 
     // ------------------------------------------------------------------------
@@ -111,7 +111,12 @@ public class ContinuousFileSplitEnumeratorTest {
 
     private static FileSourceSplit createRandomSplit() {
         return new FileSourceSplit(
-                String.valueOf(splitId++), Path.fromLocalFile(new File(TMP_DIR, "foo")), 0L, 0L);
+                String.valueOf(splitId++),
+                Path.fromLocalFile(new File(TMP_DIR, "foo")),
+                0L,
+                0L,
+                0L,
+                0L);
     }
 
     private static ContinuousFileSplitEnumerator createEnumerator(

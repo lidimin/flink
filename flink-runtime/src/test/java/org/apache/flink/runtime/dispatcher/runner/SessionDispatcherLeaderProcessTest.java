@@ -22,7 +22,6 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.client.DuplicateJobSubmissionException;
 import org.apache.flink.runtime.client.JobSubmissionException;
-import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
 import org.apache.flink.runtime.jobmanager.JobGraphStore;
@@ -34,6 +33,7 @@ import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.ExecutorUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
+import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.function.ThrowingConsumer;
 import org.apache.flink.util.function.TriFunctionWithException;
 
@@ -245,7 +245,7 @@ public class SessionDispatcherLeaderProcessTest extends TestLogger {
         final OneShotLatch createDispatcherServiceLatch = new OneShotLatch();
         final String dispatcherAddress = "myAddress";
         final TestingDispatcherGateway dispatcherGateway =
-                new TestingDispatcherGateway.Builder().setAddress(dispatcherAddress).build();
+                TestingDispatcherGateway.newBuilder().setAddress(dispatcherAddress).build();
 
         dispatcherServiceFactory =
                 TestingDispatcherServiceFactory.newBuilder()
@@ -397,7 +397,7 @@ public class SessionDispatcherLeaderProcessTest extends TestLogger {
     public void onAddedJobGraph_submitsRecoveredJob() throws Exception {
         final CompletableFuture<JobGraph> submittedJobFuture = new CompletableFuture<>();
         final TestingDispatcherGateway testingDispatcherGateway =
-                new TestingDispatcherGateway.Builder()
+                TestingDispatcherGateway.newBuilder()
                         .setSubmitFunction(
                                 submittedJob -> {
                                     submittedJobFuture.complete(submittedJob);
@@ -540,7 +540,7 @@ public class SessionDispatcherLeaderProcessTest extends TestLogger {
     @Test
     public void onAddedJobGraph_failingRecoveredJobSubmission_failsFatally() throws Exception {
         final TestingDispatcherGateway dispatcherGateway =
-                new TestingDispatcherGateway.Builder()
+                TestingDispatcherGateway.newBuilder()
                         .setSubmitFunction(
                                 jobGraph ->
                                         FutureUtils.completedExceptionally(
@@ -566,11 +566,11 @@ public class SessionDispatcherLeaderProcessTest extends TestLogger {
     public void onAddedJobGraph_duplicateJobSubmissionDueToFalsePositive_willBeIgnored()
             throws Exception {
         final TestingDispatcherGateway dispatcherGateway =
-                new TestingDispatcherGateway.Builder()
+                TestingDispatcherGateway.newBuilder()
                         .setSubmitFunction(
                                 jobGraph ->
                                         FutureUtils.completedExceptionally(
-                                                new DuplicateJobSubmissionException(
+                                                DuplicateJobSubmissionException.of(
                                                         jobGraph.getJobID())))
                         .build();
 

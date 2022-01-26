@@ -18,8 +18,10 @@
 
 package org.apache.flink.configuration;
 
+import org.apache.flink.annotation.Experimental;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.configuration.description.Description;
+import org.apache.flink.configuration.description.TextElement;
 
 import java.util.List;
 
@@ -37,14 +39,19 @@ public class DeploymentOptions {
                     .withDescription(
                             Description.builder()
                                     .text(
-                                            "The deployment target for the execution. This can take one of the following values:")
+                                            "The deployment target for the execution. This can take one of the following values "
+                                                    + "when calling %s:",
+                                            TextElement.code("bin/flink run"))
                                     .list(
                                             text("remote"),
                                             text("local"),
                                             text("yarn-per-job"),
                                             text("yarn-session"),
                                             text("kubernetes-session"))
-                                    .text(".")
+                                    .text(
+                                            "And one of the following values when calling %s:",
+                                            TextElement.code("bin/flink run-application"))
+                                    .list(text("yarn-application"), text("kubernetes-application"))
                                     .build());
 
     public static final ConfigOption<Boolean> ATTACHED =
@@ -70,4 +77,31 @@ public class DeploymentOptions {
                     .withDescription(
                             "Custom JobListeners to be registered with the execution environment."
                                     + " The registered listeners cannot have constructors with arguments.");
+
+    public static final ConfigOption<Boolean> SHUTDOWN_ON_APPLICATION_FINISH =
+            ConfigOptions.key("execution.shutdown-on-application-finish")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Whether a Flink Application cluster should shut down automatically after its application finishes"
+                                    + " (either successfully or as result of a failure). Has no effect for other deployment modes.");
+
+    @Experimental
+    public static final ConfigOption<Boolean> SUBMIT_FAILED_JOB_ON_APPLICATION_ERROR =
+            ConfigOptions.key("execution.submit-failed-job-on-application-error")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            Description.builder()
+                                    .text(
+                                            "If a failed job should be submitted (in the application mode) when"
+                                                    + " there is an error in the application driver before an actual job"
+                                                    + " submission. This is intended for providing a clean way of reporting"
+                                                    + " failures back to the user and is especially useful in combination"
+                                                    + " with '%s'. This option only works when the single job submission is"
+                                                    + " enforced ('%s' is enabled). Please note that this is an experimental"
+                                                    + " option and may be changed in the future.",
+                                            TextElement.text(SHUTDOWN_ON_APPLICATION_FINISH.key()),
+                                            TextElement.text(HighAvailabilityOptions.HA_MODE.key()))
+                                    .build());
 }

@@ -18,43 +18,36 @@
 
 package org.apache.flink.runtime.io.network.netty;
 
-import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.io.network.ConnectionID;
 import org.apache.flink.runtime.io.network.NetworkClientHandler;
 import org.apache.flink.runtime.io.network.netty.exception.RemoteTransportException;
-import org.apache.flink.util.NetUtils;
+import org.apache.flink.util.TestLogger;
 
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelException;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelFuture;
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandler;
-import org.apache.flink.shaded.netty4.io.netty.channel.ChannelHandlerContext;
-import org.apache.flink.shaded.netty4.io.netty.channel.ChannelOutboundHandlerAdapter;
-import org.apache.flink.shaded.netty4.io.netty.channel.ChannelPromise;
 
 import org.junit.Test;
 
 import java.io.IOException;
-import java.lang.Thread.UncaughtExceptionHandler;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.SocketAddress;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
 /** {@link PartitionRequestClientFactory} test. */
-public class PartitionRequestClientFactoryTest {
-
-    private static final int SERVER_PORT = NetUtils.getAvailablePort();
+public class PartitionRequestClientFactoryTest extends TestLogger {
 
     @Test
     public void testInterruptsNotCached() throws Exception {
@@ -120,6 +113,36 @@ public class PartitionRequestClientFactoryTest {
             nettyServerAndClient.client().shutdown();
             nettyServerAndClient.server().shutdown();
         }
+    }
+
+    @Test
+    public void testReuseNettyPartitionRequestClient() throws Exception {
+        NettyTestUtil.NettyServerAndClient nettyServerAndClient = createNettyServerAndClient();
+        try {
+            checkReuseNettyPartitionRequestClient(nettyServerAndClient, 1);
+            checkReuseNettyPartitionRequestClient(nettyServerAndClient, 2);
+            checkReuseNettyPartitionRequestClient(nettyServerAndClient, 5);
+            checkReuseNettyPartitionRequestClient(nettyServerAndClient, 10);
+        } finally {
+            nettyServerAndClient.client().shutdown();
+            nettyServerAndClient.server().shutdown();
+        }
+    }
+
+    private void checkReuseNettyPartitionRequestClient(
+            NettyTestUtil.NettyServerAndClient nettyServerAndClient, int maxNumberOfConnections)
+            throws Exception {
+        final Set<NettyPartitionRequestClient> set = new HashSet<>();
+
+        final PartitionRequestClientFactory factory =
+                new PartitionRequestClientFactory(
+                        nettyServerAndClient.client(), 0, maxNumberOfConnections);
+        for (int i = 0; i < Math.max(100, maxNumberOfConnections); i++) {
+            final ConnectionID connectionID =
+                    nettyServerAndClient.getConnectionID((int) (Math.random() * Integer.MAX_VALUE));
+            set.add(factory.createPartitionRequestClient(connectionID));
+        }
+        assertTrue(set.size() <= maxNumberOfConnections);
     }
 
     @Test
@@ -288,67 +311,5 @@ public class PartitionRequestClientFactoryTest {
                 throw new RuntimeException(exception);
             }
         }
-    }
-
-    private static class CountDownLatchOnConnectHandler extends ChannelOutboundHandlerAdapter {
-
-        private final CountDownLatch syncOnConnect;
-
-        public CountDownLatchOnConnectHandler(CountDownLatch syncOnConnect) {
-            this.syncOnConnect = syncOnConnect;
-        }
-
-        @Override
-        public void connect(
-                ChannelHandlerContext ctx,
-                SocketAddress remoteAddress,
-                SocketAddress localAddress,
-                ChannelPromise promise) {
-            syncOnConnect.countDown();
-        }
-    }
-
-    private static class UncaughtTestExceptionHandler implements UncaughtExceptionHandler {
-
-        private final List<Throwable> errors = new ArrayList<>(1);
-
-        @Override
-        public void uncaughtException(Thread t, Throwable e) {
-            errors.add(e);
-        }
-
-        private List<Throwable> getErrors() {
-            return errors;
-        }
-    }
-
-    // ------------------------------------------------------------------------
-
-    private static Tuple2<NettyServer, NettyClient> createNettyServerAndClient(
-            NettyProtocol protocol) throws IOException {
-        final NettyConfig config =
-                new NettyConfig(
-                        InetAddress.getLocalHost(), SERVER_PORT, 32 * 1024, 1, new Configuration());
-
-        final NettyServer server = new NettyServer(config);
-        final NettyClient client = new NettyClient(config);
-
-        boolean success = false;
-
-        try {
-            NettyBufferPool bufferPool = new NettyBufferPool(1);
-
-            server.init(protocol, bufferPool);
-            client.init(protocol, bufferPool);
-
-            success = true;
-        } finally {
-            if (!success) {
-                server.shutdown();
-                client.shutdown();
-            }
-        }
-
-        return new Tuple2<>(server, client);
     }
 }

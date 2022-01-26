@@ -75,6 +75,10 @@ public class BatchShuffleReadBufferPool {
     @GuardedBy("buffers")
     private final Queue<MemorySegment> buffers = new ArrayDeque<>();
 
+    /** The timestamp when the last buffer is recycled or allocated. */
+    @GuardedBy("buffers")
+    private long lastBufferOperationTimestamp = System.nanoTime();
+
     /** Whether this buffer pool has been destroyed or not. */
     @GuardedBy("buffers")
     private boolean destroyed;
@@ -135,11 +139,6 @@ public class BatchShuffleReadBufferPool {
 
     /** Initializes this buffer pool which allocates all the buffers. */
     public void initialize() {
-        LOG.info(
-                "Initializing batch shuffle IO buffer pool: numBuffers={}, bufferSize={}.",
-                numTotalBuffers,
-                bufferSize);
-
         synchronized (buffers) {
             checkState(!destroyed, "Buffer pool is already destroyed.");
 
@@ -175,6 +174,11 @@ public class BatchShuffleReadBufferPool {
                                 TaskManagerOptions.TASK_OFF_HEAP_MEMORY.key()));
             }
         }
+
+        LOG.info(
+                "Batch shuffle IO buffer pool initialized: numBuffers={}, bufferSize={}.",
+                numTotalBuffers,
+                bufferSize);
     }
 
     /**
@@ -203,6 +207,7 @@ public class BatchShuffleReadBufferPool {
             while (allocated.size() < numBuffersPerRequest) {
                 allocated.add(buffers.poll());
             }
+            lastBufferOperationTimestamp = System.nanoTime();
         }
         return allocated;
     }
@@ -236,9 +241,16 @@ public class BatchShuffleReadBufferPool {
             }
 
             buffers.addAll(segments);
+            lastBufferOperationTimestamp = System.nanoTime();
             if (buffers.size() >= numBuffersPerRequest) {
                 buffers.notifyAll();
             }
+        }
+    }
+
+    public long getLastBufferOperationTimestamp() {
+        synchronized (buffers) {
+            return lastBufferOperationTimestamp;
         }
     }
 

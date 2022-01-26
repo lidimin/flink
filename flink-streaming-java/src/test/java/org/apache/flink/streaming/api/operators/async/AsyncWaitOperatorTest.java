@@ -22,11 +22,13 @@ import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.java.Utils;
+import org.apache.flink.api.java.tuple.Tuple1;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
+import org.apache.flink.api.java.typeutils.runtime.TupleSerializer;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
@@ -53,11 +55,17 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamElement;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.OneInputStreamTask;
 import org.apache.flink.streaming.runtime.tasks.OneInputStreamTaskTestHarness;
+import org.apache.flink.streaming.runtime.tasks.StreamTaskMailboxTestHarness;
+import org.apache.flink.streaming.runtime.tasks.StreamTaskMailboxTestHarnessBuilder;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.TestHarnessUtil;
+import org.apache.flink.testutils.junit.SharedObjects;
+import org.apache.flink.testutils.junit.SharedReference;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.TestLogger;
+
+import org.apache.flink.shaded.guava30.com.google.common.collect.Lists;
 
 import org.hamcrest.Matchers;
 import org.junit.Assert;
@@ -70,6 +78,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
@@ -79,11 +88,15 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
@@ -100,9 +113,11 @@ import static org.junit.Assert.assertTrue;
 public class AsyncWaitOperatorTest extends TestLogger {
     private static final long TIMEOUT = 1000L;
 
-    @Rule public Timeout timeoutRule = new Timeout(10, TimeUnit.SECONDS);
+    @Rule public Timeout timeoutRule = new Timeout(100, TimeUnit.SECONDS);
+    @Rule public final SharedObjects sharedObjects = SharedObjects.create();
 
-    private static class MyAsyncFunction extends RichAsyncFunction<Integer, Integer> {
+    private abstract static class MyAbstractAsyncFunction<IN>
+            extends RichAsyncFunction<IN, Integer> {
         private static final long serialVersionUID = 8522411971886428444L;
 
         private static final long TERMINATION_TIMEOUT = 5000L;
@@ -115,7 +130,7 @@ public class AsyncWaitOperatorTest extends TestLogger {
         public void open(Configuration parameters) throws Exception {
             super.open(parameters);
 
-            synchronized (MyAsyncFunction.class) {
+            synchronized (MyAbstractAsyncFunction.class) {
                 if (counter == 0) {
                     executorService = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
                 }
@@ -132,7 +147,7 @@ public class AsyncWaitOperatorTest extends TestLogger {
         }
 
         private void freeExecutor() {
-            synchronized (MyAsyncFunction.class) {
+            synchronized (MyAbstractAsyncFunction.class) {
                 --counter;
 
                 if (counter == 0) {
@@ -151,6 +166,10 @@ public class AsyncWaitOperatorTest extends TestLogger {
                 }
             }
         }
+    }
+
+    private static class MyAsyncFunction extends MyAbstractAsyncFunction<Integer> {
+        private static final long serialVersionUID = -1504699677704123889L;
 
         @Override
         public void asyncInvoke(final Integer input, final ResultFuture<Integer> resultFuture)
@@ -183,7 +202,7 @@ public class AsyncWaitOperatorTest extends TestLogger {
         @Override
         public void asyncInvoke(final Integer input, final ResultFuture<Integer> resultFuture)
                 throws Exception {
-            this.executorService.submit(
+            executorService.submit(
                     new Runnable() {
                         @Override
                         public void run() {
@@ -203,6 +222,23 @@ public class AsyncWaitOperatorTest extends TestLogger {
         }
     }
 
+    private static class InputReusedAsyncFunction extends MyAbstractAsyncFunction<Tuple1<Integer>> {
+
+        private static final long serialVersionUID = 8627909616410487720L;
+
+        @Override
+        public void asyncInvoke(Tuple1<Integer> input, ResultFuture<Integer> resultFuture)
+                throws Exception {
+            executorService.submit(
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            resultFuture.complete(Collections.singletonList(input.f0 * 2));
+                        }
+                    });
+        }
+    }
+
     /**
      * A special {@link LazyAsyncFunction} for timeout handling. Complete the result future with 3
      * times the input when the timeout occurred.
@@ -213,6 +249,29 @@ public class AsyncWaitOperatorTest extends TestLogger {
         @Override
         public void timeout(Integer input, ResultFuture<Integer> resultFuture) throws Exception {
             resultFuture.complete(Collections.singletonList(input * 3));
+        }
+    }
+
+    /** Completes input at half the TIMEOUT and registers timeouts. */
+    private static class TimeoutAfterCompletionTestFunction
+            implements AsyncFunction<Integer, Integer> {
+        static final AtomicBoolean TIMED_OUT = new AtomicBoolean(false);
+        static final CountDownLatch COMPLETION_TRIGGER = new CountDownLatch(1);
+
+        @Override
+        public void asyncInvoke(Integer input, ResultFuture<Integer> resultFuture) {
+            ForkJoinPool.commonPool()
+                    .submit(
+                            () -> {
+                                COMPLETION_TRIGGER.await();
+                                resultFuture.complete(Collections.singletonList(input));
+                                return null;
+                            });
+        }
+
+        @Override
+        public void timeout(Integer input, ResultFuture<Integer> resultFuture) {
+            TIMED_OUT.set(true);
         }
     }
 
@@ -503,7 +562,6 @@ public class AsyncWaitOperatorTest extends TestLogger {
         streamConfig.setOperatorID(operatorID);
 
         final TestTaskStateManager taskStateManagerMock = testHarness.getTaskStateManager();
-        taskStateManagerMock.setWaitForReportLatch(new OneShotLatch());
 
         testHarness.invoke();
         testHarness.waitForTaskRunning();
@@ -594,6 +652,67 @@ public class AsyncWaitOperatorTest extends TestLogger {
                 "StateAndRestored Test Output was not correct.",
                 expectedOutput,
                 restoredTaskHarness.getOutput());
+    }
+
+    @SuppressWarnings("rawtypes")
+    @Test
+    public void testStateSnapshotAndRestoreWithObjectReused() throws Exception {
+        TypeSerializer[] fieldSerializers = new TypeSerializer[] {IntSerializer.INSTANCE};
+        TupleSerializer<Tuple1> inputSerializer =
+                new TupleSerializer<>(Tuple1.class, fieldSerializers);
+        AsyncWaitOperatorFactory<Tuple1<Integer>, Integer> factory =
+                new AsyncWaitOperatorFactory<>(
+                        new InputReusedAsyncFunction(),
+                        TIMEOUT,
+                        4,
+                        AsyncDataStream.OutputMode.ORDERED);
+
+        //noinspection unchecked
+        final OneInputStreamOperatorTestHarness<Tuple1<Integer>, Integer> testHarness =
+                new OneInputStreamOperatorTestHarness(factory, inputSerializer);
+        // enable object reuse
+        testHarness.getExecutionConfig().enableObjectReuse();
+
+        final long initialTime = 0L;
+        Tuple1<Integer> reusedTuple = new Tuple1<>();
+        StreamRecord<Tuple1<Integer>> reusedRecord = new StreamRecord<>(reusedTuple, -1L);
+
+        testHarness.setup();
+        testHarness.open();
+
+        synchronized (testHarness.getCheckpointLock()) {
+            reusedTuple.setFields(1);
+            reusedRecord.setTimestamp(initialTime + 1);
+            testHarness.processElement(reusedRecord);
+
+            reusedTuple.setFields(2);
+            reusedRecord.setTimestamp(initialTime + 2);
+            testHarness.processElement(reusedRecord);
+
+            reusedTuple.setFields(3);
+            reusedRecord.setTimestamp(initialTime + 3);
+            testHarness.processElement(reusedRecord);
+
+            reusedTuple.setFields(4);
+            reusedRecord.setTimestamp(initialTime + 4);
+            testHarness.processElement(reusedRecord);
+        }
+
+        ConcurrentLinkedQueue<Object> expectedOutput = new ConcurrentLinkedQueue<>();
+        expectedOutput.add(new StreamRecord<>(2, initialTime + 1));
+        expectedOutput.add(new StreamRecord<>(4, initialTime + 2));
+        expectedOutput.add(new StreamRecord<>(6, initialTime + 3));
+        expectedOutput.add(new StreamRecord<>(8, initialTime + 4));
+
+        synchronized (testHarness.getCheckpointLock()) {
+            testHarness.endInput();
+            testHarness.close();
+        }
+
+        TestHarnessUtil.assertOutputEquals(
+                "StateAndRestoredWithObjectReuse Test Output was not correct.",
+                expectedOutput,
+                testHarness.getOutput());
     }
 
     @Test
@@ -698,6 +817,45 @@ public class AsyncWaitOperatorTest extends TestLogger {
     }
 
     /**
+     * Checks if timeout has been called after the element has been completed within the timeout.
+     *
+     * @see <a href="https://issues.apache.org/jira/browse/FLINK-22573">FLINK-22573</a>
+     */
+    @Test
+    public void testTimeoutAfterComplete() throws Exception {
+        StreamTaskMailboxTestHarnessBuilder<Integer> builder =
+                new StreamTaskMailboxTestHarnessBuilder<>(
+                                OneInputStreamTask::new, BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO);
+        try (StreamTaskMailboxTestHarness<Integer> harness =
+                builder.setupOutputForSingletonOperatorChain(
+                                new AsyncWaitOperatorFactory<>(
+                                        new TimeoutAfterCompletionTestFunction(),
+                                        TIMEOUT,
+                                        1,
+                                        AsyncDataStream.OutputMode.UNORDERED))
+                        .build()) {
+            harness.processElement(new StreamRecord<>(1));
+            // add a timer after AsyncIO added its timer to verify that AsyncIO timer is processed
+            ScheduledFuture<?> testTimer =
+                    harness.getTimerService()
+                            .registerTimer(
+                                    harness.getTimerService().getCurrentProcessingTime() + TIMEOUT,
+                                    ts -> {});
+            // trigger the regular completion in AsyncIO
+            TimeoutAfterCompletionTestFunction.COMPLETION_TRIGGER.countDown();
+            // wait until all timers have been processed
+            testTimer.get();
+            // handle normal completion call outputting the element in mailbox thread
+            harness.processAll();
+            assertEquals(
+                    Collections.singleton(new StreamRecord<>(1)),
+                    new HashSet<>(harness.getOutput()));
+            assertFalse("no timeout expected", TimeoutAfterCompletionTestFunction.TIMED_OUT.get());
+        }
+    }
+
+    /**
      * FLINK-6435
      *
      * <p>Tests that a user exception triggers the completion of a StreamElementQueueEntry and does
@@ -793,7 +951,7 @@ public class AsyncWaitOperatorTest extends TestLogger {
     }
 
     /**
-     * Tests that the AysncWaitOperator can restart if checkpointed queue was full.
+     * Tests that the AsyncWaitOperator can restart if checkpointed queue was full.
      *
      * <p>See FLINK-7949
      */
@@ -867,6 +1025,55 @@ public class AsyncWaitOperatorTest extends TestLogger {
                         .collect(Collectors.toList());
 
         assertThat(outputElements, Matchers.equalTo(expectedOutput));
+    }
+
+    @Test
+    public void testIgnoreAsyncOperatorRecordsOnDrain() throws Exception {
+        // given: Async wait operator which are able to collect result futures.
+        StreamTaskMailboxTestHarnessBuilder<Integer> builder =
+                new StreamTaskMailboxTestHarnessBuilder<>(
+                                OneInputStreamTask::new, BasicTypeInfo.INT_TYPE_INFO)
+                        .addInput(BasicTypeInfo.INT_TYPE_INFO);
+        SharedReference<List<ResultFuture<?>>> resultFutures = sharedObjects.add(new ArrayList<>());
+        try (StreamTaskMailboxTestHarness<Integer> harness =
+                builder.setupOutputForSingletonOperatorChain(
+                                new AsyncWaitOperatorFactory<>(
+                                        new CollectableFuturesAsyncFunction<>(resultFutures),
+                                        TIMEOUT,
+                                        5,
+                                        AsyncDataStream.OutputMode.ORDERED))
+                        .build()) {
+            // when: Processing at least two elements in reverse order to keep completed queue not
+            // empty.
+            harness.processElement(new StreamRecord<>(1));
+            harness.processElement(new StreamRecord<>(2));
+
+            for (ResultFuture<?> resultFuture : Lists.reverse(resultFutures.get())) {
+                resultFuture.complete(Collections.emptyList());
+            }
+
+            // then: All records from async operator should be ignored during drain since they will
+            // be processed on recovery.
+            harness.finishProcessing();
+            assertTrue(harness.getOutput().isEmpty());
+        }
+    }
+
+    private static class CollectableFuturesAsyncFunction<IN> implements AsyncFunction<IN, IN> {
+
+        private static final long serialVersionUID = -4214078239227288637L;
+
+        private final SharedReference<List<ResultFuture<?>>> resultFutures;
+
+        private CollectableFuturesAsyncFunction(
+                SharedReference<List<ResultFuture<?>>> resultFutures) {
+            this.resultFutures = resultFutures;
+        }
+
+        @Override
+        public void asyncInvoke(IN input, ResultFuture<IN> resultFuture) throws Exception {
+            resultFutures.get().add(resultFuture);
+        }
     }
 
     private static class ControllableAsyncFunction<IN> implements AsyncFunction<IN, IN> {
